@@ -1,5 +1,5 @@
 {
-  "user_notes": "",
+  "user_notes": "Temp",
   "save_directory": "C:/Users/USER/Downloads/Test",
   "cam_0": {
     "channel_name": "Cam_NearField",
@@ -7,10 +7,10 @@
     "gain_db": 0.0,
     "target_circle": {
       "visible": true,
-      "x": 762.0,
-      "y": 562.0,
-      "w": 100.0,
-      "h": 100.0
+      "x": 604.631646902302,
+      "y": 395.733041205993,
+      "w": 485.925551765867,
+      "h": 485.925551765867
     },
     "roi_box": {
       "visible": true,
@@ -39,9 +39,5 @@
       "h": 400.0
     }
   },
-<<<<<<< HEAD
-  "timestamp": "2026-09-22 15:02:13"
-=======
-  "timestamp": "2026-09-22 15:04:00"
->>>>>>> 8401ab77004c4c89dd997625ccdc5d593de90b19
+  "timestamp": "2026-09-22 15:23:12"
 }

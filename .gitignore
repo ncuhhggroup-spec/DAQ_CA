@@ -1,2 +1,3 @@
 Camera/camera_settings.json
 *.json
+/Andor/__pycache__
