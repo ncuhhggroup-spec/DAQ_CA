@@ -3,42 +3,48 @@
     "channel": 1,
     "name": "Ch 1: Linear X",
     "stage_type": "Linear (0.025 µm/cnt)",
+    "factor": 0.025,
     "unit": "µm",
-    "factor": 0.025
+    "step": 10.0
   },
   {
     "channel": 2,
     "name": "Ch 2: Linear Y",
     "stage_type": "Linear (0.025 µm/cnt)",
+    "factor": 0.025,
     "unit": "µm",
-    "factor": 0.025
+    "step": 10.0
   },
   {
     "channel": 3,
     "name": "Ch 3: Linear Z",
     "stage_type": "Linear (0.025 µm/cnt)",
+    "factor": 0.025,
     "unit": "µm",
-    "factor": 0.025
+    "step": 10.0
   },
   {
     "channel": 4,
     "name": "Ch 4: Rotator θ",
     "stage_type": "Rotator (5.15611e-5 °/cnt)",
+    "factor": 5.156e-05,
     "unit": "°",
-    "factor": 5.156e-05
+    "step": 1.0
   },
   {
     "channel": 5,
     "name": "Ch 5: Rotator φ",
     "stage_type": "Rotator (5.15611e-5 °/cnt)",
+    "factor": 5.156e-05,
     "unit": "°",
-    "factor": 5.156e-05
+    "step": 1.0
   },
   {
     "channel": 6,
     "name": "Ch 6: Auxiliary",
     "stage_type": "Linear (0.025 µm/cnt)",
+    "factor": 0.025,
     "unit": "µm",
-    "factor": 0.025
+    "step": 10.0
   }
 ]

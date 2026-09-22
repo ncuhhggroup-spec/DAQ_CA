@@ -1,8 +1,9 @@
 @echo off
-title Oriel 6-Channel Stage Controller GUI
-python "%~dp0oriel_gui.py"
-if %ERRORLEVEL% NEQ 0 (
+title Oriel 6-Channel Stage & DAQ Controller
+echo Starting Oriel Stage & DAQ Controller GUI (V2)...
+python oriel_gui_v2.py
+if errorlevel 1 (
     echo.
-    echo Application exited with error. Press any key to close.
-    pause > nul
+    echo Application exited with an error.
+    pause
 )

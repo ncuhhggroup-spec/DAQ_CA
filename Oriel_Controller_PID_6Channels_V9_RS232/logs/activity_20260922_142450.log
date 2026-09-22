@@ -1,0 +1,12 @@
+=== Oriel Stage & DAQ Activity Logbook - 20260922_142450 ===
+
+[14:24:04] Oriel 6-Channel Controller & DAQ GUI Initialized.
+[14:24:04] Auto-save config directory: c:\Users\BeamStablizer\Documents\GitHub\DAQ_CA\Oriel_Controller_PID_6Channels_V9_RS232\config | Log directory: c:\Users\BeamStablizer\Documents\GitHub\DAQ_CA\Oriel_Controller_PID_6Channels_V9_RS232\logs
+[14:24:07] Connecting to COM7 @ 19200 baud...
+[14:24:07] [Controller] Syncing current positions of all 6 channels...
+[14:24:07] [Controller] All 6 channels positions updated.
+[14:24:07] Connected to COM7 successfully. Synced all channel positions.
+[14:24:07] Selected Channel 3
+[14:24:11] Ch 3 Moving to Target: 0.0000 µm (0 counts)
+[14:24:49] Disconnected from stage controller.
+[14:24:50] Application closing: saving parameters & logbook...

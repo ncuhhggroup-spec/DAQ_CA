@@ -242,15 +242,28 @@ void processSerialCommands(Stream& serialPort) {
 
     // 0x01: Report Status
     case 0x01: {
-      Respond[1] = channel_num;
-      Respond[2] = runningstatus;
-      Respond[3] = (*encoderValue >= 0) ? 1 : 0; 
-      U32toU8(abs(*encoderValue));
+      int query_ch = (Command[3] >= 1 && Command[3] <= 6) ? Command[3] : channel_num;
+      long val = 0;
+      bool is_run = false;
+      
+      switch (query_ch) {
+        case 1: val = encoderValue_ch1; is_run = (channel_num == 1) ? runningstatus : false; break;
+        case 2: val = encoderValue_ch2; is_run = (channel_num == 2) ? runningstatus : false; break;
+        case 3: val = encoderValue_ch3; is_run = (channel_num == 3) ? runningstatus : false; break;
+        case 4: val = encoderValue_ch4; is_run = (channel_num == 4) ? runningstatus : false; break;
+        case 5: val = encoderValue_ch5; is_run = (channel_num == 5) ? runningstatus : false; break;
+        case 6: val = encoderValue_ch6; is_run = (channel_num == 6) ? runningstatus : false; break;
+        default: val = *encoderValue; is_run = runningstatus; break;
+      }
+
+      Respond[1] = query_ch;
+      Respond[2] = is_run ? 1 : 0;
+      Respond[3] = (val >= 0) ? 1 : 0; 
+      U32toU8(abs(val));
       Respond[4] = U8_a; Respond[5] = U8_b;
       Respond[6] = U8_c; Respond[7] = U8_d;
       
       // NOTE: writing back to 'serialPort' ensures Serial1 replies to Serial1. 
-      // This preserves existing functionality.
       for (int i = 0; i < 8; i++) serialPort.write(Respond[i]);
       break;
     }
