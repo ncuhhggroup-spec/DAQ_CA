@@ -1,0 +1,42 @@
+{
+  "user_notes": "",
+  "cam_0": {
+    "channel_name": "Cam_NearField",
+    "exposure_ms": 100.0,
+    "gain_db": 0.0,
+    "target_circle": {
+      "visible": true,
+      "x": 762.0,
+      "y": 562.0,
+      "w": 100.0,
+      "h": 100.0
+    },
+    "roi_box": {
+      "visible": true,
+      "x": 612.0,
+      "y": 412.0,
+      "w": 400.0,
+      "h": 400.0
+    }
+  },
+  "cam_1": {
+    "channel_name": "Cam_FarField",
+    "exposure_ms": 100.0,
+    "gain_db": 0.0,
+    "target_circle": {
+      "visible": true,
+      "x": 762.0,
+      "y": 562.0,
+      "w": 100.0,
+      "h": 100.0
+    },
+    "roi_box": {
+      "visible": true,
+      "x": 612.0,
+      "y": 412.0,
+      "w": 400.0,
+      "h": 400.0
+    }
+  },
+  "timestamp": "2026-09-22 12:03:04"
+}
