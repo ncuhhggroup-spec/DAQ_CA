@@ -42,7 +42,7 @@ try:
         QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
         QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
         QPushButton, QSizePolicy, QSpinBox, QSplitter, QStatusBar, QTabWidget,
-        QVBoxLayout, QWidget,
+        QTextEdit, QVBoxLayout, QWidget,
     )
     _QT_BACKEND = "PyQt6"
 except ImportError:
@@ -54,7 +54,7 @@ except ImportError:
         QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
         QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
         QPushButton, QSizePolicy, QSpinBox, QSplitter, QStatusBar, QTabWidget,
-        QVBoxLayout, QWidget,
+        QTextEdit, QVBoxLayout, QWidget,
     )
     _QT_BACKEND = "PySide6"
 
@@ -225,6 +225,7 @@ class CameraDisplayPanel(QWidget):
         default_name: str,
         controller: DualGigECameraController,
         save_dir_provider: Optional[Callable[[], str]] = None,
+        log_callback: Optional[Callable[[str, str], None]] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -232,6 +233,7 @@ class CameraDisplayPanel(QWidget):
         self.channel_name = default_name
         self.controller = controller
         self.save_dir_provider = save_dir_provider
+        self.log_callback = log_callback
         
         self.latest_frame: Optional[np.ndarray] = None
         self.latest_fit: Optional[GaussianFitResult] = None
@@ -422,10 +424,11 @@ class CameraDisplayPanel(QWidget):
             mean_bg = np.mean(bg)
             self.bg_status_label.setText(f"BG: [Mean {mean_bg:.1f}]")
             self.bg_status_label.setStyleSheet("color: #10b981; font-weight: bold;")
-            QMessageBox.information(self, "Background Recorded",
-                                    f"Channel '{self.channel_name}' background recorded.\nMean: {mean_bg:.1f} ADU")
+            if self.log_callback:
+                self.log_callback(f"Channel '{self.channel_name}' background recorded (Mean: {mean_bg:.1f} ADU).", "success")
         except Exception as e:
-            QMessageBox.critical(self, "Background Error", str(e))
+            if self.log_callback:
+                self.log_callback(f"Background Error: {str(e)}", "error")
 
     def _on_analyze(self):
         if self.latest_frame is None:
@@ -455,7 +458,8 @@ class CameraDisplayPanel(QWidget):
 
     def _on_save_shot(self):
         if self.latest_frame is None:
-            QMessageBox.warning(self, "Save Shot", "No image frame available.")
+            if self.log_callback:
+                self.log_callback("Save Shot failed: No image frame available.", "warning")
             return
 
         timestamp_str = time.strftime("%Y%m%d_%H%M%S")
@@ -477,14 +481,19 @@ class CameraDisplayPanel(QWidget):
                     "rmse": self.latest_fit.residual_rmse,
                 }
             
-            saved_file = self.controller.save_tiff_with_metadata(
-                filepath=file_path,
-                index=self.cam_idx,
-                image_data=self.latest_frame,
-                extra_metadata=extra,
-                embed_background=True,
-            )
-            QMessageBox.information(self, "File Saved", f"Successfully saved TIFF to:\n{saved_file}")
+            try:
+                saved_file = self.controller.save_tiff_with_metadata(
+                    filepath=file_path,
+                    index=self.cam_idx,
+                    image_data=self.latest_frame,
+                    extra_metadata=extra,
+                    embed_background=True,
+                )
+                if self.log_callback:
+                    self.log_callback(f"Successfully saved TIFF to: {saved_file}", "success")
+            except Exception as e:
+                if self.log_callback:
+                    self.log_callback(f"Failed to save TIFF: {str(e)}", "error")
 
     def update_frame(self, frame: np.ndarray):
         """Update live view with raw frame (called at 10 Hz)."""
@@ -691,12 +700,15 @@ class DualGigECameraGUI(QMainWindow):
 
         main_layout.addLayout(path_bar)
 
+        # Content Layout with Tabs and Event Log
+        content_layout = QHBoxLayout()
+
         # Tab Widget separating the 2 camera images
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
 
-        self.cam_panel_0 = CameraDisplayPanel(0, "Cam_NearField", self.controller, save_dir_provider=self.get_save_dir)
-        self.cam_panel_1 = CameraDisplayPanel(1, "Cam_FarField", self.controller, save_dir_provider=self.get_save_dir)
+        self.cam_panel_0 = CameraDisplayPanel(0, "Cam_NearField", self.controller, save_dir_provider=self.get_save_dir, log_callback=self.log_event)
+        self.cam_panel_1 = CameraDisplayPanel(1, "Cam_FarField", self.controller, save_dir_provider=self.get_save_dir, log_callback=self.log_event)
 
         self.cam_panel_0.name_changed.connect(self._on_channel_name_changed)
         self.cam_panel_1.name_changed.connect(self._on_channel_name_changed)
@@ -704,10 +716,36 @@ class DualGigECameraGUI(QMainWindow):
         self.tabs.addTab(self.cam_panel_0, f"Cam 0: {self.cam_panel_0.channel_name}")
         self.tabs.addTab(self.cam_panel_1, f"Cam 1: {self.cam_panel_1.channel_name}")
 
-        main_layout.addWidget(self.tabs, stretch=1)
+        content_layout.addWidget(self.tabs, stretch=3)
+
+        # Event Log
+        log_group = QGroupBox("Event Log")
+        log_layout = QVBoxLayout(log_group)
+        log_layout.setContentsMargins(4, 8, 4, 4)
+        self.log_edit = QTextEdit()
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setStyleSheet("background-color: #0b0d12; color: #cbd5e1; border: 1px solid #1e2230; font-family: monospace;")
+        log_layout.addWidget(self.log_edit)
+        content_layout.addWidget(log_group, stretch=1)
+
+        main_layout.addLayout(content_layout, stretch=1)
 
         # Status Bar
         self.statusBar().showMessage("Ready | 10 Hz Live Display Engine Active | CW Acquisition ON")
+        self.log_event("Application started.", "info")
+
+    def log_event(self, msg: str, level: str = "info"):
+        """Append a message to the event log."""
+        timestamp = time.strftime("%H:%M:%S")
+        color_map = {
+            "info": "#94a3b8",
+            "success": "#10b981",
+            "warning": "#f59e0b",
+            "error": "#ef4444",
+        }
+        color = color_map.get(level, "#e2e8f0")
+        formatted = f'<div><span style="color: #64748b;">[{timestamp}]</span> <span style="color: {color};">{msg}</span></div>'
+        self.log_edit.append(formatted)
 
     def _on_channel_name_changed(self, cam_idx: int, name: str):
         """Update tab label when camera channel name is changed."""
