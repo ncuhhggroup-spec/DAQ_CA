@@ -1,5 +1,6 @@
 {
   "user_notes": "",
+  "save_directory": "C:\\Users\\BeamStablizer\\Documents\\GitHub\\DAQ_CA\\Camera\\data",
   "cam_0": {
     "channel_name": "Cam_NearField",
     "exposure_ms": 100.0,
@@ -38,5 +39,5 @@
       "h": 400.0
     }
   },
-  "timestamp": "2026-09-22 12:03:04"
+  "timestamp": "2026-09-22 14:32:22"
 }
