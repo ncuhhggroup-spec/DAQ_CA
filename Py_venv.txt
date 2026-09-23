@@ -4,5 +4,5 @@ Clone the repository.
 Create and activate a virtual environment (e.g., python -m venv .venv && .venv\Scripts\activate).
 Install the listed dependencies:
 bash
-pip install -r requirements.txt
+.\.venv\Scripts\pip install -r requirements.txt
 If you later need additional packages (e.g., caproto), uncomment the relevant line and reinstall.
