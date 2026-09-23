@@ -11,10 +11,11 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QSplitter, QStatusBar,
     QMessageBox, QFrame, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSettings
 import serial.tools.list_ports
 
 from serial_worker import SerialWorker
+from widgets.prompt_view import PromptViewWidget
 from widgets.node_card import NodeCardWidget, LedIndicator
 from widgets.master_panel import MasterPanelWidget
 from widgets.log_panel import LogPanelWidget
@@ -258,8 +259,13 @@ class MainWindow(QMainWindow):
         for nid in (1, 2, 3):
             card = NodeCardWidget(node_id=nid, title=f"Axis {nid}")
             card.sig_send_command.connect(self._send_command)
+            # Connect label changed signal to update settings immediately
+            card.sig_label_changed.connect(self._on_label_changed)
             self.node_cards[nid] = card
             nodes_layout.addWidget(card, 1)
+
+        # Load persisted settings (labels)
+        self._load_settings()
 
         top_layout.addLayout(nodes_layout)
         splitter.addWidget(top_container)
@@ -268,8 +274,10 @@ class MainWindow(QMainWindow):
         # Serial Monitor & Command Terminal Panel
         # -------------------------------------------------------------
         self.log_panel = LogPanelWidget()
+self.prompt_view = PromptViewWidget()
         self.log_panel.sig_send_raw.connect(self._send_raw)
         splitter.addWidget(self.log_panel)
+splitter.addWidget(self.prompt_view)
 
         # Splitter sizing: 65% controls, 35% logs
         splitter.setSizes([550, 250])
@@ -384,6 +392,28 @@ class MainWindow(QMainWindow):
             self.log_panel.append_error(ts, f"Cannot send '{node_id}{cmd}': Serial port not connected.")
             self.statusBar.showMessage("Error: Connect to serial port first.")
 
+    def _load_settings(self):
+        """Load persisted settings such as axis labels and window geometry."""
+        settings = QSettings('BeamStablizer', 'DAQ_CA')
+        # Restore window geometry
+        geometry = settings.value('geometry')
+        if geometry:
+            self.restoreGeometry(geometry)
+        # Load node labels
+        for nid, card in self.node_cards.items():
+            label = settings.value(f'node_{nid}_label', type=str)
+            if label:
+                card.set_label(label)
+
+    def _save_settings(self):
+        """Persist current settings like axis labels and window geometry."""
+        settings = QSettings('BeamStablizer', 'DAQ_CA')
+        # Save geometry
+        settings.setValue('geometry', self.saveGeometry())
+        # Save node labels
+        for nid, card in self.node_cards.items():
+            settings.setValue(f'node_{nid}_label', card.get_label())
+
     def _send_raw(self, raw_cmd: str):
         """Dispatch user typed command from console."""
         if self.worker and self.worker.isRunning():
@@ -394,7 +424,10 @@ class MainWindow(QMainWindow):
             self.statusBar.showMessage("Error: Connect to serial port first.")
 
     def closeEvent(self, event):
-        """Cleanly shutdown serial worker on window close."""
+        """Cleanly shutdown serial worker and persist settings on window close."""
+        # Save settings before exiting
+        self._save_settings()
+        # Stop worker if running
         if self.worker and self.worker.isRunning():
             self.worker.stop()
         event.accept()
