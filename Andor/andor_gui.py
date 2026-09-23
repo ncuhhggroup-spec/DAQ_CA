@@ -662,9 +662,9 @@ def _create_image_view_container(
     plot_item = pg.PlotItem()
     plot_item.setLabel("bottom", x_label, units=x_units)
     plot_item.setLabel("left", y_label)
-    plot_item.getViewBox().setAspectLocked(aspect_locked)
 
     iv = pg.ImageView(view=plot_item)
+    iv.getView().setAspectLocked(aspect_locked)
     try:
         iv.ui.histogram.gradient.loadPreset(colormap)
     except Exception:
@@ -1069,6 +1069,7 @@ class AndorMainWindow(QMainWindow):
             x_label="Wavelength", x_units="nm", y_label="Y Pixel", aspect_locked=False
         )
         self._tab_widget.addTab(cal_widget, "〜  Wavelength Calibrated")
+        self._tab_widget.currentChanged.connect(self._on_tab_changed)
 
         layout.addWidget(self._tab_widget)
         return container
@@ -1145,8 +1146,9 @@ class AndorMainWindow(QMainWindow):
     # Calibration Helpers
     # ------------------------------------------------------------------
 
-    def _update_wavelength_vector(self) -> None:
-        n_cols = self._driver.width if (self._driver and self._driver.is_initialized) else 1024
+    def _update_wavelength_vector(self, n_cols: Optional[int] = None) -> None:
+        if n_cols is None:
+            n_cols = self._driver.width if (self._driver and self._driver.is_initialized) else 1024
         theta0 = self._theta0_spin.value()
         self._lambda_vec = calculate_lambda_vec(n_cols, theta0)
 
@@ -1160,7 +1162,7 @@ class AndorMainWindow(QMainWindow):
         """
         h, w = data_s.shape
         if self._lambda_vec is None or len(self._lambda_vec) != w:
-            self._update_wavelength_vector()
+            self._update_wavelength_vector(w)
 
         lv = self._lambda_vec
         wl_min = float(lv[0])
@@ -1168,23 +1170,23 @@ class AndorMainWindow(QMainWindow):
         wl_span = wl_max - wl_min
         dx = wl_span / float(w)
 
+        # Apply QTransform to map pixel column [0 ... W] to [wl_min ... wl_max]
+        tr = QTransform()
+        tr.translate(wl_min, 0.0)
+        tr.scale(dx, 1.0)
+
         # pyqtgraph ImageView displays (W, H)
         self._cal_iv.setImage(
             data_s.T,
             autoRange=False,
             autoLevels=True,
             autoHistogramRange=True,
+            transform=tr,
         )
 
-        # Apply QTransform to map pixel column [0 ... W] to [wl_min ... wl_max]
-        item = self._cal_iv.getImageItem()
-        tr = QTransform()
-        tr.translate(wl_min, 0.0)
-        tr.scale(dx, 1.0)
-        item.setTransform(tr)
-
         vb = self._cal_iv.getView()
-        vb.setRange(xRange=[wl_min, wl_max], yRange=[0, h], padding=0.02)
+        vb.setAspectLocked(False)
+        vb.setRange(xRange=[wl_min, wl_max], yRange=[0, h], padding=0.0)
         _refresh_stats(self._cal_stats, data_s)
 
     def _build_metadata(self) -> dict:
@@ -1460,6 +1462,14 @@ class AndorMainWindow(QMainWindow):
             self._apply_calibrated_image(self._last_sub)
         elif self._last_raw is not None:
             self._apply_calibrated_image(self._last_raw.astype(np.float32))
+
+    @Slot(int)
+    def _on_tab_changed(self, index: int) -> None:
+        if index == 1:
+            if self._last_sub is not None:
+                self._apply_calibrated_image(self._last_sub)
+            elif self._last_raw is not None:
+                self._apply_calibrated_image(self._last_raw.astype(np.float32))
 
     @Slot()
     def _on_browse_output_dir(self) -> None:
