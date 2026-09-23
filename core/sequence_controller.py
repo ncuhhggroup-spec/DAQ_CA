@@ -49,6 +49,9 @@ class SequenceController:
         self.data_mgr = data_mgr
         self.dg645 = dg645
         self.state = SystemState.IDLE
+        self.shot_target: int = 1
+        self.file_name: str = "exp_run"
+        self.note: str = ""
         self._frames: int | None = None
         self._buffer_shape: tuple[int, int, int] | None = None
 
@@ -58,6 +61,65 @@ class SequenceController:
     def _set_state(self, new_state: SystemState) -> None:
         logger.info("State transition: %s -> %s", self.state.name, new_state.name)
         self.state = new_state
+
+    def set_experiment_config(self, file_name: str, note: str, shot_target: int = 1) -> None:
+        """Configure experiment metadata and shot count."""
+        self.file_name = file_name
+        self.note = note
+        self.shot_target = max(1, int(shot_target))
+
+    def run_full_sequence(
+        self,
+        frames: Optional[int] = None,
+        file_name: Optional[str] = None,
+        note: Optional[str] = None,
+        output_dir: str = "data",
+    ) -> bool:
+        """Run complete single-shot or multi-shot sequence synchronously.
+
+        Designed to be dispatched to a background worker thread (e.g. via
+        asyncio.to_thread) to prevent blocking the asyncio / EPICS event loop.
+        """
+        import pathlib
+        from datetime import datetime
+
+        if frames is not None:
+            self.shot_target = max(1, int(frames))
+        if file_name is not None:
+            self.file_name = file_name
+        if note is not None:
+            self.note = note
+
+        target_frames = self.shot_target
+        out_dir = pathlib.Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        hdf5_path = out_dir / f"{self.file_name}_{timestamp}.h5"
+        tiff_path = out_dir / f"{self.file_name}_{timestamp}.tif"
+
+        try:
+            # 1. Arm & start
+            self.arm_and_start(frames=target_frames)
+            # 2. Acquire
+            self.acquire()
+            # 3. Save
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "file_name": str(hdf5_path.name),
+                "shot_target": target_frames,
+                "stage_pos": self.stage.get_position(1) if hasattr(self.stage, "get_position") else 0,
+                "note": self.note,
+            }
+            self.save(hdf5_path=hdf5_path, tiff_path=tiff_path, log_entry=log_entry)
+            return True
+        except Exception as e:
+            logger.error("Sequence failed: %s", e)
+            self._set_state(SystemState.ERROR)
+            try:
+                self.cam.disarm()
+            except Exception:
+                pass
+            return False
 
     # ---------------------------------------------------------------------
     # Public API – arm_and_start performs all checks
