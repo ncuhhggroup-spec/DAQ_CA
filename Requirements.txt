@@ -7,9 +7,17 @@ PyQt5>=5.15.0  # Required for Oriel controller GUI
 # Serial communication
 pyserial>=3.5
 
-# Numerical and data handling
+# Numerical, scientific and data persistence
 numpy>=1.21.0
 pandas>=1.3.0
+scipy>=1.10.0
+h5py>=3.8.0
+tifffile>=2023.1.1
+openpyxl>=3.1.0
 
-# Optional: if using CAPROTO in future extensions, uncomment below
-# caproto>=1.0.0
+# EPICS Channel Access (IOC Server)
+caproto>=1.0.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
