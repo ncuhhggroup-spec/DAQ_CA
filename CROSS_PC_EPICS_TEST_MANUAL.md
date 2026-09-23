@@ -97,7 +97,7 @@ python ca_client_test.py --server-ip 192.168.1.32
 
 #### Expected Test Output on PC B:
 ```text
-[Config] Set EPICS_CA_ADDR_LIST = 192.168.1.100 (AUTO_ADDR_LIST=NO)
+[Config] Set EPICS_CA_ADDR_LIST = 192.168.1.32 (AUTO_ADDR_LIST=NO)
 
 ========================================================
   CONNECTING TO DAQ IOC SERVER (Prefix: EXP:Seq:)
@@ -106,9 +106,9 @@ python ca_client_test.py --server-ip 192.168.1.32
 [1/4] Reading initial PV values...
   - EXP:Seq:ShotTarget   = 1
   - EXP:Seq:Arm          = 0
-  - EXP:Seq:State        = IDLE
-  - EXP:Seq:FileName     = exp_run
-  - EXP:Seq:Note         = 
+  - EXP:Seq:State        = 'IDLE'
+  - EXP:Seq:FileName     = 'exp_run'
+  - EXP:Seq:Note         = ''
 
 >>> Connection verified successfully!
 
@@ -116,6 +116,7 @@ python ca_client_test.py --server-ip 192.168.1.32
   - Setting FileName   -> 'remote_test_1234'
   - Setting Note       -> 'Remote PC DAQ test'
   - Setting ShotTarget -> 3
+  [Readback] FileName='remote_test_1234', Note='Remote PC DAQ test', ShotTarget=3
 
 [3/4] Triggering Acquisition (Arm = 1)...
 
@@ -136,7 +137,7 @@ You can also interact with the PVs individually using standard EPICS command-lin
 
 Set the destination server IP in PowerShell on PC B:
 ```powershell
-$env:EPICS_CA_ADDR_LIST = "192.168.1.100"
+$env:EPICS_CA_ADDR_LIST = "192.168.1.32"
 $env:EPICS_CA_AUTO_ADDR_LIST = "NO"
 ```
 

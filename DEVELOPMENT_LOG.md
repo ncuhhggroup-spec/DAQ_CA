@@ -26,3 +26,4 @@
 - Implemented `tests/test_ioc_server.py` validating PV creation, parameter updating, asynchronous arming, and interlock error handling.
 - **Validation Status**: Full test suite (`pytest tests`) passed with 7/7 tests (100% OK).
 - Created `ca_client_test.py` automated cross-PC test client and `CROSS_PC_EPICS_TEST_MANUAL.md` process manual covering LAN network setup, firewall rules, automated multi-PC validation, and command-line verification.
+- Refined `ca_client_test.py` with `decode_epics_value`: robustly decodes EPICS char-waveform ASCII integer arrays (`[73, 68, 76, 69]` -> `"IDLE"`) and bytes; added empty-array safeguards for `Note` and `FileName` to prevent `IndexError` on zero-length responses. Updated `ca_server/ioc_server.py` `State` PV definition with `max_length=32`.

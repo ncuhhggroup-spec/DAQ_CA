@@ -65,6 +65,7 @@ class DAQIOC(PVGroup):
         value="IDLE",
         doc="Current DAQ system state (IDLE, ARMED, ACQUIRING, SAVING, ERROR)",
         dtype=str,
+        max_length=32,
         read_only=True,
     )
 
