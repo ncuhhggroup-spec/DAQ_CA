@@ -25,3 +25,4 @@
 - Thread Isolation: Wrapped all blocking hardware I/O and data persistence calls using `asyncio.to_thread` (`SequenceController.run_full_sequence`), keeping the caproto network event loop completely non-blocking.
 - Implemented `tests/test_ioc_server.py` validating PV creation, parameter updating, asynchronous arming, and interlock error handling.
 - **Validation Status**: Full test suite (`pytest tests`) passed with 7/7 tests (100% OK).
+- Created `ca_client_test.py` automated cross-PC test client and `CROSS_PC_EPICS_TEST_MANUAL.md` process manual covering LAN network setup, firewall rules, automated multi-PC validation, and command-line verification.
