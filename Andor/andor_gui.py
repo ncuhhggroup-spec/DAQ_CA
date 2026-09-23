@@ -346,7 +346,7 @@ _DEFAULT_SETTINGS = {
     "colormap": "viridis",
     "output_dir": "",
     "user_note": "",
-    "save_enabled_idx": 0,
+    "save_mode_idx": 0,
     "sim_mode_idx": 0,
     "window_geometry": None,
 }
@@ -715,6 +715,7 @@ class AndorMainWindow(QMainWindow):
         self._shot_count:  int = 0
         self._lambda_vec:  Optional[np.ndarray] = None
         self._last_raw:    Optional[np.ndarray] = None
+        self._last_bg:     Optional[np.ndarray] = None
         self._last_sub:    Optional[np.ndarray] = None
 
         # Load persisted settings
@@ -961,16 +962,26 @@ class AndorMainWindow(QMainWindow):
         dir_row.addWidget(self._out_dir_edit)
         dir_row.addWidget(browse_btn)
 
-        self._save_enabled_combo = QComboBox()
-        self._save_enabled_combo.addItems([
-            "Save TIFF Per Shot (D_k, B_k, S_k)",
+        mode_lbl = QLabel("Save Mode")
+        mode_lbl.setStyleSheet(LABEL_STYLE)
+
+        self._save_mode_combo = QComboBox()
+        self._save_mode_combo.addItems([
+            "Manual (Click 'Save Current Data')",
+            "Auto-Save Every Shot",
             "Do Not Save",
         ])
-        self._save_enabled_combo.setStyleSheet(COMBO_STYLE)
+        self._save_mode_combo.setStyleSheet(COMBO_STYLE)
+
+        self._output_save_btn = QPushButton("💾  Save Current Data")
+        self._output_save_btn.setStyleSheet(BUTTON_STYLE_PRIMARY)
+        self._output_save_btn.clicked.connect(self._on_save_data_clicked)
 
         lay.addWidget(dir_lbl)
         lay.addLayout(dir_row)
-        lay.addWidget(self._save_enabled_combo)
+        lay.addWidget(mode_lbl)
+        lay.addWidget(self._save_mode_combo)
+        lay.addWidget(self._output_save_btn)
         return grp
 
     def _make_note_group(self) -> QGroupBox:
@@ -1023,12 +1034,17 @@ class AndorMainWindow(QMainWindow):
         self._rolling_start_btn.setStyleSheet(BUTTON_STYLE_VIOLET)
         self._rolling_start_btn.clicked.connect(self._on_start_rolling)
 
+        self._save_btn = QPushButton("💾  Save Current Data")
+        self._save_btn.setStyleSheet(BUTTON_STYLE_PRIMARY)
+        self._save_btn.clicked.connect(self._on_save_data_clicked)
+
         self._stop_btn = QPushButton("■  Abort Acquisition")
         self._stop_btn.setStyleSheet(BUTTON_STYLE_DANGER)
         self._stop_btn.clicked.connect(self._on_stop)
 
         lay.addWidget(self._start_btn)
         lay.addWidget(self._rolling_start_btn)
+        lay.addWidget(self._save_btn)
         lay.addWidget(self._stop_btn)
         return grp
 
@@ -1099,7 +1115,7 @@ class AndorMainWindow(QMainWindow):
             self._cmap_combo.setCurrentIndex(idx)
         self._out_dir_edit.setText(s.get("output_dir", ""))
         self._note_edit.setText(s.get("user_note", ""))
-        self._save_enabled_combo.setCurrentIndex(int(s.get("save_enabled_idx", 0)))
+        self._save_mode_combo.setCurrentIndex(int(s.get("save_mode_idx", s.get("save_enabled_idx", 0))))
         self._sim_combo.setCurrentIndex(int(s.get("sim_mode_idx", 0)))
 
         geo = s.get("window_geometry")
@@ -1120,7 +1136,7 @@ class AndorMainWindow(QMainWindow):
             "colormap":         self._cmap_combo.currentText(),
             "output_dir":       self._out_dir_edit.text().strip(),
             "user_note":        self._note_edit.text().strip(),
-            "save_enabled_idx": self._save_enabled_combo.currentIndex(),
+            "save_mode_idx":    self._save_mode_combo.currentIndex(),
             "sim_mode_idx":     self._sim_combo.currentIndex(),
             "window_geometry":  bytes(self.saveGeometry()).hex(),
         }
@@ -1294,6 +1310,8 @@ class AndorMainWindow(QMainWindow):
     def _on_single_frame_ready(self, frame: np.ndarray) -> None:
         self._frame_count += 1
         self._last_raw = frame
+        self._last_bg = None
+        self._last_sub = frame.astype(np.float32)
         self._update_counter_label()
 
         # Update Tab 1 (Raw Image)
@@ -1305,24 +1323,14 @@ class AndorMainWindow(QMainWindow):
         # Update Tab 2 (Wavelength Calibrated - single shot shown without subtraction)
         self._apply_calibrated_image(frame.astype(np.float32))
 
-        # Check if saving requested
-        if self._should_save():
-            meta = self._build_metadata()
-            bg_zero = np.zeros_like(frame)
-            try:
-                saved = save_shot_tiff(
-                    self._out_dir_edit.text().strip(),
-                    self._shot_count + 1,
-                    frame, bg_zero, frame.astype(np.float32),
-                    meta,
-                )
-                self._set_status(f"Saved: {saved.name}")
-            except Exception as exc:
-                logger.error("Error saving TIFF: %s", exc)
+        # Auto-save if configured
+        if self._should_auto_save():
+            self._save_current_data(is_auto=True)
 
     @Slot(np.ndarray)
     def _on_bg_ready(self, bg_0: np.ndarray) -> None:
         self._frame_count += 1
+        self._last_bg = bg_0
         self._update_counter_label()
         self._raw_iv.setImage(
             bg_0.T, autoRange=False, autoLevels=True, autoHistogramRange=True
@@ -1337,6 +1345,7 @@ class AndorMainWindow(QMainWindow):
         self._shot_count = shot_k
         self._frame_count += 2  # D_k and B_k
         self._last_raw = d_k
+        self._last_bg = b_k
         self._last_sub = s_k
         self._update_counter_label()
 
@@ -1349,15 +1358,57 @@ class AndorMainWindow(QMainWindow):
         # Update Tab 2: Wavelength Calibrated Cleaned Signal S_k
         self._apply_calibrated_image(s_k)
 
-        # Save TIFF if configured
-        if self._should_save():
-            meta = self._build_metadata()
-            out_dir = self._out_dir_edit.text().strip()
-            try:
-                saved = save_shot_tiff(out_dir, shot_k, d_k, b_k, s_k, meta)
-                self._set_status(f"Shot {shot_k} saved: {saved.name}")
-            except Exception as exc:
-                logger.error("Failed to save TIFF for shot %d: %s", shot_k, exc)
+        # Auto-save TIFF if configured
+        if self._should_auto_save():
+            self._save_current_data(is_auto=True)
+
+    def _save_current_data(self, is_auto: bool = False) -> Optional[pathlib.Path]:
+        """Save the last acquired shot / frame to a multi-page TIFF file with metadata."""
+        if self._last_raw is None:
+            if not is_auto:
+                QMessageBox.information(
+                    self, "No Data", "No frame or shot data has been acquired yet to save."
+                )
+            return None
+
+        out_dir = self._out_dir_edit.text().strip()
+        if not out_dir:
+            if not is_auto:
+                selected = QFileDialog.getExistingDirectory(
+                    self, "Select Destination Output Folder", str(pathlib.Path.home())
+                )
+                if selected:
+                    self._out_dir_edit.setText(selected)
+                    out_dir = selected
+                else:
+                    return None
+            else:
+                return None
+
+        raw = self._last_raw
+        bg = self._last_bg if self._last_bg is not None else np.zeros_like(raw)
+        sub = self._last_sub if self._last_sub is not None else (raw.astype(np.float32) - bg.astype(np.float32))
+
+        shot_idx = self._shot_count if self._shot_count > 0 else max(1, self._frame_count)
+        meta = self._build_metadata()
+
+        try:
+            saved = save_shot_tiff(out_dir, shot_idx, raw, bg, sub, meta)
+            prefix = "Auto-saved" if is_auto else "Saved"
+            self._set_status(f"{prefix}: {saved.name}")
+            return saved
+        except Exception as exc:
+            logger.error("Failed to save TIFF: %s", exc)
+            if not is_auto:
+                QMessageBox.critical(self, "Save Error", f"Failed to save TIFF: {exc}")
+            return None
+
+    @Slot()
+    def _on_save_data_clicked(self) -> None:
+        """Triggered manually by clicking the 'Save Current Data' button."""
+        saved = self._save_current_data(is_auto=False)
+        if saved:
+            self.statusBar().showMessage(f"✓ Saved current data to {saved.name}", 4000)
 
     @Slot(str)
     def _on_acq_error(self, err_msg: str) -> None:
@@ -1423,9 +1474,10 @@ class AndorMainWindow(QMainWindow):
     # Helper Queries
     # ------------------------------------------------------------------
 
-    def _should_save(self) -> bool:
+    def _should_auto_save(self) -> bool:
+        # Index 1 = "Auto-Save Every Shot"
         return (
-            self._save_enabled_combo.currentIndex() == 0
+            self._save_mode_combo.currentIndex() == 1
             and bool(self._out_dir_edit.text().strip())
         )
 
@@ -1467,6 +1519,9 @@ class AndorMainWindow(QMainWindow):
         self._gain_spin.setEnabled(not acquiring)
         self._trig_combo.setEnabled(not acquiring)
         self._sim_combo.setEnabled(not acquiring)
+        # Save buttons are always enabled once UI is ready
+        self._save_btn.setEnabled(True)
+        self._output_save_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Application Shutdown
