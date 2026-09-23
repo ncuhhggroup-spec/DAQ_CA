@@ -13,17 +13,26 @@ EPICS Channel Access uses standard ports:
 - **Port 5065 (UDP)**: CA Beacon
 
 ### On PC A (Server PC)
+```powershell
+### On PC A (Server PC)
 1. Find PC A's LAN IP address:
    ```powershell
    ipconfig
-   # Look for IPv4 Address, e.g. 192.168.1.100
-   ```
-2. Allow Python through Windows Defender Firewall, or allow inbound traffic on TCP/UDP port 5064 & 5065:
-   ```powershell
-   # Run in PowerShell (Admin) on PC A if firewall blocks incoming CA packets:
-   netsh advfirewall firewall add rule name="EPICS CA 5064" dir=in action=allow protocol=TCP localport=5064
-   netsh advfirewall firewall add rule name="EPICS CA UDP" dir=in action=allow protocol=UDP localport=5064,5065
-   ```
+   # Look for IPv4 Address, e.g. 192.168.1.32
+
+```
+
+2. Configure Windows Defender Firewall rules for EPICS CA and Ping (ICMPv4):
+```powershell
+# Run in PowerShell (Admin) on PC A:
+
+# Allow EPICS Channel Access (TCP 5064, UDP 5064-5065)
+netsh advfirewall firewall add rule name="EPICS CA 5064" dir=in action=allow protocol=TCP localport=5064
+netsh advfirewall firewall add rule name="EPICS CA UDP" dir=in action=allow protocol=UDP localport=5064,5065
+
+# Allow ICMPv4 (Ping requests)
+netsh advfirewall firewall add rule name="Allow ICMPv4-In" protocol=icmpv4:8,any dir=in action=allow
+
 
 ### Check Connectivity
 From **PC B (Client PC)**, verify you can ping PC A:
@@ -83,7 +92,7 @@ Copy `ca_client_test.py` to PC B (or clone the repository on PC B), then execute
 
 ```powershell
 # Replace 192.168.1.100 with the actual IP address of PC A
-python ca_client_test.py --server-ip 192.168.1.100
+python ca_client_test.py --server-ip 192.168.1.32
 ```
 
 #### Expected Test Output on PC B:
