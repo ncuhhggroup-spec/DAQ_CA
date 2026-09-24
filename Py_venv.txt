@@ -7,3 +7,6 @@ bash
 .\.venv\Scripts\pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 .\.venv\Scripts\pip install -r requirements.txt
 If you later need additional packages (e.g., caproto), uncomment the relevant line and reinstall.
+
+Quick command: 
+.\.venv\Scripts\python.exe -m ca_server.ioc_server
