@@ -18,6 +18,14 @@ import json
 import logging
 from pathlib import Path
 
+import os
+
+# If the user provides a specific IOC server IP via the `IOC_IP` environment variable,
+# configure EPICS Channel Access to target that address. This does not override any
+# existing EPICS_CA_ADDR_LIST value if the user has set it manually.
+if "IOC_IP" in os.environ:
+    os.environ.setdefault("EPICS_CA_ADDR_LIST", os.environ["IOC_IP"])
+
 from PySide6.QtCore import Qt, Signal, Slot, QThread
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
