@@ -1,0 +1,2 @@
+IOC_Server: 
+.\.venv\Scripts\python.exe -m ca_server.ioc_server
