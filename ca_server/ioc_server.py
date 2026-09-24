@@ -85,6 +85,41 @@ class DAQIOC(PVGroup):
         max_length=128,
     )
 
+    # 6. StageStatus PV (string, read‑only, default DISCONNECTED)
+    StageStatus = pvproperty(
+        value="DISCONNECTED",
+        doc="Stage connection status",
+        dtype=str,
+        max_length=32,
+        read_only=True,
+    )
+
+    # 7. DG645Status PV (string, read‑only, default DISCONNECTED)
+    DG645Status = pvproperty(
+        value="DISCONNECTED",
+        doc="DG645 timing module status",
+        dtype=str,
+        max_length=32,
+        read_only=True,
+    )
+
+    # 8. CameraStatus PV (string, read‑only, default DISCONNECTED)
+    CameraStatus = pvproperty(
+        value="DISCONNECTED",
+        doc="Camera connection status",
+        dtype=str,
+        max_length=32,
+        read_only=True,
+    )
+
+    # 9. ShotInterval PV (float, writable, default 10.0, min 0.1, max 3600.0)
+    ShotInterval = pvproperty(
+        value=10.0,
+        doc="Inter‑shot interval in seconds",
+        dtype=float,
+        read_only=False,
+    )
+
     def __init__(self, *args, controller: Optional[SequenceController] = None, **kwargs):
         super().__init__(*args, **kwargs)
         if controller is None:
@@ -96,6 +131,28 @@ class DAQIOC(PVGroup):
             self.controller = SequenceController(stage=stage, cam=cam, data_mgr=data_mgr, dg645=dg645)
         else:
             self.controller = controller
+
+        # Determine hardware connection status (real drivers vs mocks)
+        try:
+            stage_connected = not isinstance(self.controller.stage, MockStageDriver)
+        except Exception:
+            stage_connected = False
+        try:
+            camera_connected = not isinstance(self.controller.cam, MockCameraGUI)
+        except Exception:
+            camera_connected = False
+        try:
+            dg_connected = not isinstance(self.controller.dg645, MockDG645Driver)
+        except Exception:
+            dg_connected = False
+
+        # Schedule initial PV updates (run after event loop starts)
+        loop = asyncio.get_event_loop()
+        def _init_statuses():
+            asyncio.ensure_future(self.StageStatus.write(value="CONNECTED" if stage_connected else "DISCONNECTED"))
+            asyncio.ensure_future(self.CameraStatus.write(value="CONNECTED" if camera_connected else "DISCONNECTED"))
+            asyncio.ensure_future(self.DG645Status.write(value="CONNECTED" if dg_connected else "DISCONNECTED"))
+        loop.call_soon_threadsafe(_init_statuses)
 
         # Sync initial state
         self._lock = asyncio.Lock()
@@ -122,6 +179,20 @@ class DAQIOC(PVGroup):
         val = str(value)
         logger.info("[IOC] Note updated: '%s'", val)
         self.controller.note = val
+        return val
+
+    @ShotInterval.putter
+    async def ShotInterval(self, instance, value):
+        """Validate and update shot interval (seconds)."""
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            val = 10.0
+        # Clamp to allowed range
+        val = max(0.1, min(3600.0, val))
+        logger.info("[IOC] ShotInterval set to %s", val)
+        if hasattr(self.controller, "shot_interval"):
+            self.controller.shot_interval = val
         return val
 
     @Arm.putter
@@ -186,6 +257,10 @@ if __name__ == "__main__":
     print("  - EXP:Seq:State      (str, RO)")
     print("  - EXP:Seq:FileName   (str, R/W)")
     print("  - EXP:Seq:Note       (str, R/W)")
+    print("  - EXP:Seq:StageStatus (str, RO)")
+    print("  - EXP:Seq:DG645Status (str, RO)")
+    print("  - EXP:Seq:CameraStatus (str, RO)")
+    print("  - EXP:Seq:ShotInterval (float, R/W)")
     print("-----------------------------------------------------------------")
     
     ioc = create_ioc(prefix="EXP:Seq:")

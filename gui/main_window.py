@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QSpinBox,
+    QDoubleSpinBox,
     QPushButton,
     QTextEdit,
     QHBoxLayout,
@@ -44,7 +45,7 @@ from PySide6.QtWidgets import (
 import pyqtgraph as pg
 
 # caproto imports – the client side of EPICS Channel Access
-from caproto.threading import client as caproto_client
+from caproto.asyncio.client import Context
 
 log = logging.getLogger(__name__)
 
@@ -94,9 +95,10 @@ class EPICSWorker(QThread):
         """Request the thread to finish.
         """
         self._running = False
-        # Wake the loop if it is sleeping
+        # Wake the loop if it is sleeping and still open
         if self.loop and not self.loop.is_closed():
-            self.loop.call_soon_threadsafe(self.loop.stop)
+            # Trigger the loop to exit its sleep
+            self.loop.call_soon_threadsafe(lambda: None)
 
     # ---------------------------------------------------------------------
     # EPICS client helpers – all async
@@ -110,25 +112,49 @@ class EPICSWorker(QThread):
             "Note": "Note",
             "Arm": "Arm",
             "State": "State",
+            "ShotInterval": "ShotInterval",
+            "StageStatus": "StageStatus",
+            "DG645Status": "DG645Status",
+            "CameraStatus": "CameraStatus",
         }
         for attr, name in pv_names.items():
             full_name = f"{self.prefix}{name}"
-            # caproto_client creates a ``Channel`` object that we can use
-            # for both get/set and subscription.
-            chan = caproto_client.Channel(full_name)
-            await chan.connect()
+            # Use the asyncio Context to obtain a PV object.
+            # ``get_pvs`` returns a list; we expect exactly one PV per name.
+            pvs = await Context().get_pvs(full_name)
+            if not pvs:
+                raise RuntimeError(f"PV {full_name} not found")
+            chan = pvs[0]
             self.pvs[attr] = chan
             # Subscribe to changes for the State PV – others could be added
             if attr == "State":
-                await chan.add_change_callback(self._state_callback)
+                chan.add_callback(self._state_callback)
+            elif attr == "StageStatus":
+                chan.add_callback(lambda pv, val: self._update_status_label(self.stage_status, val))
+            elif attr == "DG645Status":
+                chan.add_callback(lambda pv, val: self._update_status_label(self.dg645_status, val))
+            elif attr == "CameraStatus":
+                chan.add_callback(lambda pv, val: self._update_status_label(self.camera_status, val))
         self.console_message.emit("Connected to EPICS IOC server.")
 
-    async def _state_callback(self, pv, value, **kwargs):
+    def _state_callback(self, pv, value, **kwargs):
         """Callback invoked by caproto when the State PV changes.
         """
         state = value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
         self.state_changed.emit(state)
         self.console_message.emit(f"State changed → {state}")
+
+    def _update_status_label(self, label: QLabel, value) -> None:
+        """Update a status QLabel based on PV value.
+        If the value contains 'CONNECTED', set green; otherwise red.
+        """
+        text = value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+        if "CONNECTED" in text.upper():
+            color = "#28a745"
+        else:
+            color = "#dc3545"
+        label.setStyleSheet(f"background-color: {color}; color: white; padding: 2px;")
+        label.setText(text)
 
     # ---------------------------------------------------------------------
     # Public API used by the GUI
@@ -141,7 +167,7 @@ class EPICSWorker(QThread):
             return
         async def _write():
             chan = self.pvs[name]
-            await chan.put(value, wait=True)
+            await chan.write(value)
             self.console_message.emit(f"Wrote {name} = {value}")
         self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_write()))
 
@@ -199,6 +225,21 @@ class MainWindow(QWidget):
         self.note_edit = QLineEdit()
         self.note_edit.setObjectName("note_edit")
 
+        self.interval_spin = QDoubleSpinBox()
+        self.interval_spin.setRange(0.1, 3600.0)
+        self.interval_spin.setValue(10.0)
+        self.interval_spin.setSuffix(" s")
+        self.interval_spin.setObjectName("interval_spin")
+        self.interval_spin.setDecimals(2)
+
+        # Instrument status indicators (colored labels)
+        self.stage_status = QLabel("Stage: UNKNOWN")
+        self.stage_status.setObjectName("stage_status")
+        self.dg645_status = QLabel("DG645: UNKNOWN")
+        self.dg645_status.setObjectName("dg645_status")
+        self.camera_status = QLabel("Camera: UNKNOWN")
+        self.camera_status.setObjectName("camera_status")
+
         param_layout = QVBoxLayout()
         param_layout.addWidget(QLabel("Shot Target:"))
         param_layout.addWidget(self.shot_spin)
@@ -206,6 +247,13 @@ class MainWindow(QWidget):
         param_layout.addWidget(self.filename_edit)
         param_layout.addWidget(QLabel("Note:"))
         param_layout.addWidget(self.note_edit)
+        param_layout.addWidget(QLabel("Shot Interval (s):"))
+        param_layout.addWidget(self.interval_spin)
+        param_layout.addSpacing(10)
+        param_layout.addWidget(QLabel("Instrument Status:"))
+        param_layout.addWidget(self.stage_status)
+        param_layout.addWidget(self.dg645_status)
+        param_layout.addWidget(self.camera_status)
 
         # --- Control buttons ----------------------------------------------------
         self.arm_btn = QPushButton("ARM / START")
@@ -271,6 +319,7 @@ class MainWindow(QWidget):
         self.shot_spin.valueChanged.connect(lambda v: self.worker.write_pv("ShotTarget", v))
         self.filename_edit.editingFinished.connect(lambda: self.worker.write_pv("FileName", self.filename_edit.text()))
         self.note_edit.editingFinished.connect(lambda: self.worker.write_pv("Note", self.note_edit.text()))
+        self.interval_spin.valueChanged.connect(lambda v: self.worker.write_pv("ShotInterval", v))
         self.arm_btn.clicked.connect(self._on_arm)
         self.disarm_btn.clicked.connect(self._on_disarm)
 
@@ -301,7 +350,7 @@ class MainWindow(QWidget):
         self._apply_state_style(new_state)
         # Disable parameter widgets while active
         active = new_state.upper() in {"ARMED", "ACQUIRING", "SAVING"}
-        for w in (self.shot_spin, self.filename_edit, self.note_edit):
+        for w in (self.shot_spin, self.filename_edit, self.note_edit, self.interval_spin):
             w.setEnabled(not active)
         self.arm_btn.setEnabled(not active)
         self.disarm_btn.setEnabled(active)

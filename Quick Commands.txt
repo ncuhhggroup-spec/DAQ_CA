@@ -1,2 +1,16 @@
 IOC_Server: 
 .\.venv\Scripts\python.exe -m ca_server.ioc_server
+
+[ Step 1: 硬體/驅動層 ]  --> 實體儀器連線 (Stage, DG645, Camera)
+          │
+          ▼
+[ Step 2: IOC Server 創建 ]--> ioc_server.py 宣告 PV (名稱、形態、預設值)
+          │
+          ▼
+[ Step 3: EPICS 網路廣播 ]--> caproto 將 PV 暴露於 LAN / Loopback (端口 5064/5065)
+          │
+          ▼
+[ Step 4: Client 搜尋與訂閱]--> main_window.py 透過 Channel Access 尋找並 subscribe()
+          │
+          ▼
+[ Step 5: 動態更新與事件通知]--> Server 變更 PV 值 --> 自動推播 (Push) 給 Client GUI 繪製
