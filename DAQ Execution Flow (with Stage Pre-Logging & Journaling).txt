@@ -1,0 +1,30 @@
+flowchart TD
+    subgraph Step1 ["1. Local Setup & Stage Pre-Check"]
+        A[Move Faulhaber/Homemade Stage] --> B[Query Stage Coordinates: Stage:PosVal]
+        B --> C[Log Stage Position to Journal & Record Metadata]
+        C --> D[Configure Camera & DG645 Locally]
+    end
+    subgraph Step2 ["2. Experiment Configuration & Journaling"]
+        E[Set Filename Prefix: FileName] --> F[Set User Notes: Note]
+        F --> G[Set Shot Count: ShotTarget = 1 or 10]
+        G --> H[Log Parameter Changes to Journal Console]
+    end
+    subgraph Step3 ["3. Arming & Interlock Check"]
+        I[Call controller.arm_and_start] --> J{Interlock: Stage:IsMoving == 0?}
+        J -- Moving --> K[Reject Arming & Return Warning to Journal]
+        J -- Static --> L[Pre-allocate RAM Buffer & Embed Stage Metadata]
+        L --> M[Switch Cameras to EXTERNAL_TTL Mode]
+        M --> N[Set State = ARMED & Update QSS Style]
+    end
+    subgraph Step4 ["4. Auto-Fire & High-Speed Capture"]
+        N --> O[Automatically Issue DG645 Burst: N Pulses]
+        O --> P[Cameras Capture TTL Frames into Pre-allocated RAM]
+        P --> Q[Update Progress & Live 2D Gaussian Preview]
+    end
+    subgraph Step5 ["5. Persistence, Journaling & Analysis"]
+        Q --> R[Save Raw Data to HDF5/TIFF with Stage Metadata Tag]
+        R --> S[Execute 2D Gaussian Fit Analysis]
+        S --> T[Append Row to experiment_log.xlsx]
+        T --> U[Write Run Summary to experiment_journal.log & GUI Console]
+        U --> V[Reset State to IDLE & Disarm Cameras]
+    end
