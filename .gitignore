@@ -2,3 +2,6 @@ Camera/camera_settings.json
 *.json
 /Andor/__pycache__
 ~$experiment_log.xlsx
+*.pyc
+*.tif
+*.h5
