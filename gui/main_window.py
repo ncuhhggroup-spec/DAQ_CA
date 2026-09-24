@@ -65,6 +65,7 @@ class EPICSWorker(QThread):
     state_changed = Signal(str)               # New state string
     console_message = Signal(str)             # Arbitrary log line
     frame_received = Signal(object)           # NumPy array representing a camera frame
+    ioc_status_changed = Signal(bool)         # True=connected, False=disconnected
 
     def __init__(self, prefix: str = "EXP:Seq:"):
         super().__init__()
@@ -130,12 +131,13 @@ class EPICSWorker(QThread):
             if attr == "State":
                 chan.add_callback(self._state_callback)
             elif attr == "StageStatus":
-                chan.add_callback(lambda pv, val: self._update_status_label(self.stage_status, val))
+                chan.add_callback(lambda pv, val: self._safe_update_status(self.stage_status, val))
             elif attr == "DG645Status":
-                chan.add_callback(lambda pv, val: self._update_status_label(self.dg645_status, val))
+                chan.add_callback(lambda pv, val: self._safe_update_status(self.dg645_status, val))
             elif attr == "CameraStatus":
-                chan.add_callback(lambda pv, val: self._update_status_label(self.camera_status, val))
+                chan.add_callback(lambda pv, val: self._safe_update_status(self.camera_status, val))
         self.console_message.emit("Connected to EPICS IOC server.")
+        self.ioc_status_changed.emit(True)
 
     def _state_callback(self, pv, value, **kwargs):
         """Callback invoked by caproto when the State PV changes.
@@ -155,6 +157,15 @@ class EPICSWorker(QThread):
             color = "#dc3545"
         label.setStyleSheet(f"background-color: {color}; color: white; padding: 2px;")
         label.setText(text)
+
+    def _safe_update_status(self, label: QLabel, value) -> None:
+        """Wrapper to call _update_status_label with exception handling."""
+        try:
+            self._update_status_label(label, value)
+        except Exception as exc:  # pragma: no cover – defensive
+            log.exception("Exception in status label update: %s", exc)
+            # Emit to console for visibility
+            self.console_message.emit(f"[EPICS Error] Status update failed: {exc}")
 
     # ---------------------------------------------------------------------
     # Public API used by the GUI
@@ -238,6 +249,8 @@ class MainWindow(QWidget):
         self.dg645_status = QLabel("DG645: UNKNOWN")
         self.dg645_status.setObjectName("dg645_status")
         self.camera_status = QLabel("Camera: UNKNOWN")
+        self.ioc_status = QLabel("IOC: DISCONNECTED")
+        self.ioc_status.setStyleSheet("background-color: #dc3545; color: white; padding: 2px;")
         self.camera_status.setObjectName("camera_status")
 
         param_layout = QVBoxLayout()
@@ -254,6 +267,7 @@ class MainWindow(QWidget):
         param_layout.addWidget(self.stage_status)
         param_layout.addWidget(self.dg645_status)
         param_layout.addWidget(self.camera_status)
+        param_layout.addWidget(self.ioc_status)
 
         # --- Control buttons ----------------------------------------------------
         self.arm_btn = QPushButton("ARM / START")
@@ -327,8 +341,16 @@ class MainWindow(QWidget):
         self.worker.state_changed.connect(self._on_state_change)
         self.worker.console_message.connect(self._append_console)
         self.worker.frame_received.connect(self._update_image)
+        self.worker.ioc_status_changed.connect(self._update_ioc_status)
 
     # ---------------------------------------------------------------------
+    def _update_ioc_status(self, connected: bool) -> None:
+        """Update IOC connection status label based on boolean flag."""
+        text = "IOC: CONNECTED" if connected else "IOC: DISCONNECTED"
+        self.ioc_status.setText(text)
+        color = "#28a745" if connected else "#dc3545"
+        self.ioc_status.setStyleSheet(f"background-color: {color}; color: white; padding: 2px;")
+
     # UI event handlers
     # ---------------------------------------------------------------------
     @Slot()
