@@ -25,6 +25,7 @@ import os
 # existing EPICS_CA_ADDR_LIST value if the user has set it manually.
 if "IOC_IP" in os.environ:
     os.environ.setdefault("EPICS_CA_ADDR_LIST", os.environ["IOC_IP"])
+    os.environ.setdefault("EPICS_CA_AUTO_ADDR_LIST", "NO")
 
 from PySide6.QtCore import Qt, Signal, Slot, QThread
 from PySide6.QtGui import QCloseEvent
@@ -129,13 +130,13 @@ class EPICSWorker(QThread):
             self.pvs[attr] = chan
             # Subscribe to changes for the State PV – others could be added
             if attr == "State":
-                chan.add_callback(self._state_callback)
+                chan.subscribe(self._state_callback)
             elif attr == "StageStatus":
-                chan.add_callback(lambda pv, val: self._safe_update_status(self.stage_status, val))
+                chan.subscribe(lambda pv, response: self._safe_update_status(self.stage_status, response.data[0] if hasattr(response, 'data') else response))
             elif attr == "DG645Status":
-                chan.add_callback(lambda pv, val: self._safe_update_status(self.dg645_status, val))
+                chan.subscribe(lambda pv, response: self._safe_update_status(self.dg645_status, response.data[0] if hasattr(response, 'data') else response))
             elif attr == "CameraStatus":
-                chan.add_callback(lambda pv, val: self._safe_update_status(self.camera_status, val))
+                chan.subscribe(lambda pv, response: self._safe_update_status(self.camera_status, response.data[0] if hasattr(response, 'data') else response))
         self.console_message.emit("Connected to EPICS IOC server.")
         self.ioc_status_changed.emit(True)
 
