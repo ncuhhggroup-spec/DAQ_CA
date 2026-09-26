@@ -5,3 +5,4 @@ Camera/camera_settings.json
 *.pyc
 *.tif
 *.h5
+experiment_log.xlsx
