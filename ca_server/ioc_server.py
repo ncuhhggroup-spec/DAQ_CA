@@ -191,21 +191,10 @@ class DAQIOC(PVGroup):
 
         # Store a reference to the diagnostic status group if it exists
         self._diag_status = getattr(self, "diagnostic_status", None)
-
-        # Schedule initial PV updates (run after event loop starts)
-        loop = asyncio.get_event_loop()
-        def _init_statuses():
-            asyncio.ensure_future(self.StageStatus.write(value="CONNECTED" if stage_connected else "DISCONNECTED"))
-            asyncio.ensure_future(self.CameraStatus.write(value="CONNECTED" if camera_connected else "DISCONNECTED"))
-            asyncio.ensure_future(self.DG645Status.write(value="CONNECTED" if dg_connected else "DISCONNECTED"))
-            # Initialise error message as empty
-            asyncio.ensure_future(self.ErrorMessage.write(value=""))
-            # Also update diagnostic status PVs if present
-            if self._diag_status:
-                asyncio.ensure_future(self._diag_status.StageStatus.write(value="CONNECTED" if stage_connected else "DISCONNECTED"))
-                asyncio.ensure_future(self._diag_status.CameraStatus.write(value="CONNECTED" if camera_connected else "DISCONNECTED"))
-                asyncio.ensure_future(self._diag_status.DG645Status.write(value="CONNECTED" if dg_connected else "DISCONNECTED"))
-        loop.call_soon_threadsafe(_init_statuses)
+        # Remember hardware connection flags for later status updates
+        self._stage_connected = stage_connected
+        self._camera_connected = camera_connected
+        self._dg_connected = dg_connected
 
         # Sync initial state
         self._lock = asyncio.Lock()
@@ -333,4 +322,4 @@ if __name__ == "__main__":
     
     daq_ioc, diag_ioc = create_ioc(prefix="EXP:Seq:")
     # Run both PVGroups together
-    run([daq_ioc.pvdb, diag_ioc.pvdb], startup_hook=None)
+    run({**daq_ioc.pvdb, **diag_ioc.pvdb}, startup_hook=None)

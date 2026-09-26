@@ -80,17 +80,21 @@ class EPICSWorker(QThread):
     # Qt/QThread overrides
     # ---------------------------------------------------------------------
     def run(self) -> None:
-        """Entry point for the thread – creates and runs the asyncio loop.
-        """
+        """Entry point for the thread – creates and runs the asyncio loop."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.loop.run_until_complete(self._setup())
-        # Run the loop forever until the thread is asked to stop
+        # Run loop until stop requested
         while self._running:
             try:
                 self.loop.run_until_complete(asyncio.sleep(0.1))
             except Exception as exc:  # pragma: no cover – defensive
                 log.exception("Exception in EPICSWorker loop: %s", exc)
+        # Graceful shutdown: cancel pending tasks
+        pending = asyncio.all_tasks(self.loop)
+        for task in pending:
+            task.cancel()
+        self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         self.loop.close()
 
     def stop(self) -> None:
