@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from .device_status import DeviceStatus
 from typing import Optional
 
 from caproto.server import PVGroup, pvproperty, run
@@ -112,6 +113,48 @@ class DAQIOC(PVGroup):
         read_only=True,
     )
 
+    # 9. ErrorMessage PV (string, read‑only, default empty)
+    ErrorMessage = pvproperty(
+        value="",
+        doc="Latest error message from server",
+        dtype=str,
+        max_length=256,
+        read_only=True,
+    )
+
+    # 10. ResetError PV (int, write‑only trigger to clear error message)
+    ResetError = pvproperty(
+        value=0,
+        doc="Write 1 to clear the ErrorMessage PV",
+        dtype=int,
+        read_only=False,
+    )
+
+    # 11. Rescan PV (int, write‑only trigger to refresh device statuses)
+    Rescan = pvproperty(
+        value=0,
+        doc="Write 1 to re‑evaluate device connection statuses",
+        dtype=int,
+        read_only=False,
+    )
+
+    # 9. ErrorMessage PV (string, read‑only, default empty)
+    ErrorMessage = pvproperty(
+        value="",
+        doc="Latest error message from server",
+        dtype=str,
+        max_length=256,
+        read_only=True,
+    )
+
+    # 10. ResetError PV (int, write‑only trigger to clear error message)
+    ResetError = pvproperty(
+        value=0,
+        doc="Write 1 to clear the ErrorMessage PV",
+        dtype=int,
+        read_only=False,
+    )
+
     # 9. ShotInterval PV (float, writable, default 10.0, min 0.1, max 3600.0)
     ShotInterval = pvproperty(
         value=10.0,
@@ -146,12 +189,22 @@ class DAQIOC(PVGroup):
         except Exception:
             dg_connected = False
 
+        # Store a reference to the diagnostic status group if it exists
+        self._diag_status = getattr(self, "diagnostic_status", None)
+
         # Schedule initial PV updates (run after event loop starts)
         loop = asyncio.get_event_loop()
         def _init_statuses():
             asyncio.ensure_future(self.StageStatus.write(value="CONNECTED" if stage_connected else "DISCONNECTED"))
             asyncio.ensure_future(self.CameraStatus.write(value="CONNECTED" if camera_connected else "DISCONNECTED"))
             asyncio.ensure_future(self.DG645Status.write(value="CONNECTED" if dg_connected else "DISCONNECTED"))
+            # Initialise error message as empty
+            asyncio.ensure_future(self.ErrorMessage.write(value=""))
+            # Also update diagnostic status PVs if present
+            if self._diag_status:
+                asyncio.ensure_future(self._diag_status.StageStatus.write(value="CONNECTED" if stage_connected else "DISCONNECTED"))
+                asyncio.ensure_future(self._diag_status.CameraStatus.write(value="CONNECTED" if camera_connected else "DISCONNECTED"))
+                asyncio.ensure_future(self._diag_status.DG645Status.write(value="CONNECTED" if dg_connected else "DISCONNECTED"))
         loop.call_soon_threadsafe(_init_statuses)
 
         # Sync initial state
@@ -232,6 +285,8 @@ class DAQIOC(PVGroup):
 
             except Exception as exc:
                 logger.error("[IOC] DAQ sequence error: %s", exc)
+                # Populate error message PV
+                await self.ErrorMessage.write(value=str(exc))
                 await self.State.write(value="ERROR")
             finally:
                 # Reset Arm PV back to 0
@@ -241,9 +296,22 @@ class DAQIOC(PVGroup):
 def create_ioc(
     prefix: str = "EXP:Seq:",
     controller: Optional[SequenceController] = None,
-) -> DAQIOC:
-    """Factory creating DAQIOC instance with custom PV prefix."""
-    return DAQIOC(prefix=prefix, controller=controller)
+) -> tuple[DAQIOC, "DeviceStatus"]:
+    """Factory creating DAQIOC and DeviceStatus instances with appropriate prefixes."""
+    daq_ioc = DAQIOC(prefix=prefix, controller=controller)
+    # Diagnostic status group uses its own prefix
+    diagnostic_ioc = DeviceStatus(prefix="EXP:Dev:")
+    # Link the diagnostic group to the main IOC for status updates
+    daq_ioc.diagnostic_status = diagnostic_ioc
+    return daq_ioc, diagnostic_ioc
+
+    @ResetError.putter
+    async def ResetError(self, instance, value):
+        """Clear the ErrorMessage PV when a 1 is written."""
+        if int(value) == 1:
+            await self.ErrorMessage.write(value="")
+            logger.info("[IOC] ErrorMessage cleared via ResetError PV")
+        return 0
 
 
 if __name__ == "__main__":
@@ -263,5 +331,6 @@ if __name__ == "__main__":
     print("  - EXP:Seq:ShotInterval (float, R/W)")
     print("-----------------------------------------------------------------")
     
-    ioc = create_ioc(prefix="EXP:Seq:")
-    run(ioc.pvdb, startup_hook=None)
+    daq_ioc, diag_ioc = create_ioc(prefix="EXP:Seq:")
+    # Run both PVGroups together
+    run([daq_ioc.pvdb, diag_ioc.pvdb], startup_hook=None)
