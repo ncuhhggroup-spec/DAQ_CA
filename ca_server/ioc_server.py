@@ -138,6 +138,34 @@ class DAQIOC(PVGroup):
         read_only=False,
     )
 
+    @Rescan.putter
+    async def Rescan(self, instance, value):
+        """When written with 1, re‑evaluate hardware connection flags and update diagnostic PVs."""
+        if int(value) == 1:
+            # Re‑determine connection status
+            try:
+                stage_connected = not isinstance(self.controller.stage, MockStageDriver)
+            except Exception:
+                stage_connected = False
+            try:
+                camera_connected = not isinstance(self.controller.cam, MockCameraGUI)
+            except Exception:
+                camera_connected = False
+            try:
+                dg_connected = not isinstance(self.controller.dg645, MockDG645Driver)
+            except Exception:
+                dg_connected = False
+            self._stage_connected = stage_connected
+            self._camera_connected = camera_connected
+            self._dg_connected = dg_connected
+            # Update diagnostic status group if present
+            if self._diag_status:
+                await self._diag_status.StageStatus.write(value="CONNECTED" if stage_connected else "DISCONNECTED")
+                await self._diag_status.DG645Status.write(value="CONNECTED" if dg_connected else "DISCONNECTED")
+                await self._diag_status.CameraStatus.write(value="CONNECTED" if camera_connected else "DISCONNECTED")
+            logger.info("[IOC] Rescan performed – updated connection status PVs")
+        return 0
+
     # 9. ErrorMessage PV (string, read‑only, default empty)
     ErrorMessage = pvproperty(
         value="",
@@ -321,5 +349,41 @@ if __name__ == "__main__":
     print("-----------------------------------------------------------------")
     
     daq_ioc, diag_ioc = create_ioc(prefix="EXP:Seq:")
-    # Run both PVGroups together
-    run({**daq_ioc.pvdb, **diag_ioc.pvdb}, startup_hook=None)
+    # ---------------------------------------------------------------------
+    # Helper functions for startup banner and initial status
+    # ---------------------------------------------------------------------
+    async def _apply_initial_status(ioc: DAQIOC, diag: DeviceStatus) -> None:
+        """Set initial hardware‑connection status PVs and print a banner.
+
+        This runs after the server has started. It writes the connection status
+        PVs (StageStatus, DG645Status, CameraStatus) based on the flags stored
+        in the DAQIOC instance and prints a human‑readable list of all PV names
+        with their initial values.
+        """
+        # Print banner
+        print("=================================================================")
+        print("               IOC PV INITIALIZATION BANNER")
+        print("=================================================================")
+        for name, pv in {**ioc.pvdb, **diag.pvdb}.items():
+            try:
+                val = pv.value
+            except Exception:
+                val = "<error>"
+            print(f"  {name}: {val}")
+        # Update diagnostic status PVs
+        await diag.StageStatus.write(value="CONNECTED" if ioc._stage_connected else "DISCONNECTED")
+        await diag.DG645Status.write(value="CONNECTED" if ioc._dg_connected else "DISCONNECTED")
+        await diag.CameraStatus.write(value="CONNECTED" if ioc._camera_connected else "DISCONNECTED")
+
+    async def _startup_hook(async_lib) -> None:
+        """Startup hook passed to caproto.run.
+
+        Parameters
+        ----------
+        async_lib: Any
+            The async library instance provided by caproto (ignored here).
+        """
+        await _apply_initial_status(daq_ioc, diag_ioc)
+
+    # Run both PVGroups together with startup hook
+    run({**daq_ioc.pvdb, **diag_ioc.pvdb}, startup_hook=_startup_hook)
