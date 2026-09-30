@@ -1,6 +1,12 @@
+#import asyncio
+#import logging
+#from caproto.asyncio.server import PVGroup, pvproperty, run
+#from caproto.server import PVGroup, pvproperty, run
+#from caproto import ChannelType
+
 import asyncio
 import logging
-from caproto.asyncio.server import PVGroup, pvproperty, run
+from caproto.server import PVGroup, pvproperty, run
 from caproto import ChannelType
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -143,5 +149,6 @@ class HardwareDAQPVGroup(PVGroup):
 
 if __name__ == '__main__':
     logging.info("Starting EPICS Hardware IOC Server with 8 PV Spec...")
-    pvdb = HardwareDAQPVGroup()
-    run(pvdb.pvdb, startup_hook=None)
+    # 傳入 prefix='' 避免 TypeError
+    pvdb = HardwareDAQPVGroup(prefix='')
+    run(pvdb.pvdb)

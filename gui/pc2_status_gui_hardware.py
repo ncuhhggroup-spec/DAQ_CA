@@ -1,18 +1,18 @@
 import sys
 import logging
 from datetime import datetime
-
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QLabel, QGroupBox, QListWidget, QListWidgetItem
+    QGridLayout, QLabel, QGroupBox, QTextEdit
 )
 from PySide6.QtCore import QThread, Signal, Slot, Qt
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont
 
 import epics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# 8-PV Specifications
 PVS = {
     "ShotTarget": "EXP:Seq:ShotTarget",
     "Arm": "EXP:Seq:Arm",
@@ -24,10 +24,11 @@ PVS = {
     "CameraStatus": "EXP:Seq:CameraStatus",
 }
 
+
 class StatusWorker(QThread):
     """
-    Thread-isolated PyEpics monitoring worker for PC2 Status GUI.
-    Subscribes to all 8 PVs and emits Qt signals on state/value changes.
+    Thread-isolated PyEpics worker for PC2 Status GUI.
+    Monitors all 8 PVs and emits Qt signals when changes occur.
     """
     pv_changed = Signal(str, object)
     log_emitted = Signal(str)
@@ -37,7 +38,7 @@ class StatusWorker(QThread):
         self._pv_objs = {}
 
     def run(self):
-        self.log_emitted.emit("StatusWorker monitoring thread started. Monitoring 8 hardware PVs...")
+        self.log_emitted.emit("StatusWorker thread started. Subscribing to EPICS PVs...")
 
         for key, pv_name in PVS.items():
             pv = epics.PV(pv_name, callback=self._on_pv_change)
@@ -46,7 +47,8 @@ class StatusWorker(QThread):
             if val is not None:
                 self.pv_changed.emit(key, val)
 
-        self.exec_()
+        # PySide6: standard 'exec()' instead of deprecated 'exec_()'
+        self.exec()
 
     def _on_pv_change(self, pvname=None, value=None, **kwargs):
         for key, name in PVS.items():
@@ -54,15 +56,15 @@ class StatusWorker(QThread):
                 self.pv_changed.emit(key, value)
                 break
 
+
 class PC2StatusGUIHardware(QMainWindow):
     """
-    PC2 Monitoring Status GUI with QThread-isolated StatusWorker.
-    Renders real-time hardware status badges, sequence state, and timestamped event logs.
+    PC2 Status GUI for monitoring sequence state, hardware connection status, and event logs.
     """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PC2 Status Monitoring GUI - Hardware Integration (8-PV Spec)")
-        self.resize(750, 550)
+        self.setWindowTitle("PC2 Status Monitor - Hardware Integration (8-PV Spec)")
+        self.resize(700, 550)
 
         self._setup_ui()
         self._start_worker()
@@ -73,82 +75,66 @@ class PC2StatusGUIHardware(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         # Title
-        title_label = QLabel("PC2 Hardware & DAQ Status Monitor")
+        title_label = QLabel("PC2 DAQ System Status Panel")
         title_label.setFont(QFont("Segoe UI", 14, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
 
-        # Badges & Indicators Row
-        badge_layout = QHBoxLayout()
+        # Top Section: Badges & System State
+        status_group = QGroupBox("Hardware & System State")
+        status_layout = QHBoxLayout(status_group)
 
-        # State Badge Box
-        state_box = QGroupBox("Sequence State")
-        state_box_layout = QVBoxLayout(state_box)
-        self.state_label = QLabel("UNKNOWN")
-        self.state_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        self.state_label = QLabel("STATE: UNKNOWN")
+        self.state_label.setFont(QFont("Segoe UI", 11, QFont.Bold))
         self.state_label.setAlignment(Qt.AlignCenter)
-        self.state_label.setStyleSheet("background-color: #616161; color: white; border-radius: 8px; padding: 10px;")
-        state_box_layout.addWidget(self.state_label)
-        badge_layout.addWidget(state_box)
+        self.state_label.setStyleSheet("background-color: #424242; color: white; padding: 8px; border-radius: 4px;")
+        status_layout.addWidget(self.state_label)
 
-        # DG645 Badge Box
-        dg_box = QGroupBox("DG645 Status")
-        dg_layout = QVBoxLayout(dg_box)
-        self.dg_label = QLabel("UNKNOWN")
-        self.dg_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
-        self.dg_label.setAlignment(Qt.AlignCenter)
-        self.dg_label.setStyleSheet("background-color: #616161; color: white; border-radius: 8px; padding: 10px;")
-        dg_layout.addWidget(self.dg_label)
-        badge_layout.addWidget(dg_box)
+        self.dg645_badge = QLabel("DG645: UNKNOWN")
+        self.dg645_badge.setAlignment(Qt.AlignCenter)
+        self.dg645_badge.setStyleSheet("background-color: #424242; color: white; padding: 8px; border-radius: 4px;")
+        status_layout.addWidget(self.dg645_badge)
 
-        # Camera Badge Box
-        cam_box = QGroupBox("Camera Status")
-        cam_layout = QVBoxLayout(cam_box)
-        self.cam_label = QLabel("UNKNOWN")
-        self.cam_label.setFont(QFont("Segoe UI", 12, QFont.Bold))
-        self.cam_label.setAlignment(Qt.AlignCenter)
-        self.cam_label.setStyleSheet("background-color: #616161; color: white; border-radius: 8px; padding: 10px;")
-        cam_layout.addWidget(self.cam_label)
-        badge_layout.addWidget(cam_box)
+        self.camera_badge = QLabel("Camera: UNKNOWN")
+        self.camera_badge.setAlignment(Qt.AlignCenter)
+        self.camera_badge.setStyleSheet("background-color: #424242; color: white; padding: 8px; border-radius: 4px;")
+        status_layout.addWidget(self.camera_badge)
 
-        main_layout.addLayout(badge_layout)
+        main_layout.addWidget(status_group)
 
-        # Details Grid
-        details_group = QGroupBox("Live Sequence Data")
-        grid_layout = QGridLayout(details_group)
+        # Middle Section: Sequence Parameters Readout
+        param_group = QGroupBox("Sequence Readouts")
+        grid_layout = QGridLayout(param_group)
 
         grid_layout.addWidget(QLabel("Shot Target:"), 0, 0)
         self.target_val = QLabel("-")
         self.target_val.setFont(QFont("Segoe UI", 10, QFont.Bold))
         grid_layout.addWidget(self.target_val, 0, 1)
 
-        grid_layout.addWidget(QLabel("Current Shot #:"), 0, 2)
+        grid_layout.addWidget(QLabel("Current Shot:"), 0, 2)
         self.shot_val = QLabel("-")
         self.shot_val.setFont(QFont("Segoe UI", 10, QFont.Bold))
         grid_layout.addWidget(self.shot_val, 0, 3)
 
-        grid_layout.addWidget(QLabel("File Name:"), 1, 0)
+        grid_layout.addWidget(QLabel("File Name Prefix:"), 1, 0)
         self.filename_val = QLabel("-")
         self.filename_val.setFont(QFont("Segoe UI", 10, QFont.Bold))
         grid_layout.addWidget(self.filename_val, 1, 1)
 
-        grid_layout.addWidget(QLabel("ARM PV:"), 1, 2)
-        self.arm_val = QLabel("-")
-        self.arm_val.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        grid_layout.addWidget(self.arm_val, 1, 3)
-
-        grid_layout.addWidget(QLabel("Error Message:"), 2, 0)
+        grid_layout.addWidget(QLabel("Error Message:"), 1, 2)
         self.error_val = QLabel("None")
-        self.error_val.setStyleSheet("color: #f44336;")
-        grid_layout.addWidget(self.error_val, 2, 1, 1, 3)
+        self.error_val.setStyleSheet("color: #4caf50;")
+        grid_layout.addWidget(self.error_val, 1, 3)
 
-        main_layout.addWidget(details_group)
+        main_layout.addWidget(param_group)
 
-        # Event Log Window
-        log_group = QGroupBox("Real-Time Event Log")
+        # Bottom Section: Event Logging Window
+        log_group = QGroupBox("System Event Log")
         log_layout = QVBoxLayout(log_group)
-        self.log_list = QListWidget()
-        log_layout.addWidget(self.log_list)
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        log_layout.addWidget(self.log_text)
 
         main_layout.addWidget(log_group)
 
@@ -160,57 +146,61 @@ class PC2StatusGUIHardware(QMainWindow):
 
     @Slot(str, object)
     def _on_pv_changed(self, key, value):
-        val_str = str(value)
+        val_str = str(value) if value is not None else ""
 
         if key == "State":
-            self.state_label.setText(val_str)
-            colors = {
+            self.state_label.setText(f"STATE: {val_str}")
+            color_map = {
                 "IDLE": "#2196f3",
                 "ARMED": "#ff9800",
                 "ACQUIRING": "#00bcd4",
                 "SAVING": "#9c27b0",
-                "ERROR": "#f44336",
+                "ERROR": "#f44336"
             }
-            bg = colors.get(val_str, "#616161")
-            self.state_label.setStyleSheet(f"background-color: {bg}; color: white; border-radius: 8px; padding: 10px;")
+            bg_color = color_map.get(val_str, "#424242")
+            self.state_label.setStyleSheet(f"background-color: {bg_color}; color: white; padding: 8px; border-radius: 4px;")
             self._add_log_entry(f"State changed -> {val_str}")
 
         elif key == "DG645Status":
-            self.dg_label.setText(val_str)
-            bg = "#4caf50" if val_str == "CONNECTED" else "#f44336"
-            self.dg_label.setStyleSheet(f"background-color: {bg}; color: white; border-radius: 8px; padding: 10px;")
+            self.dg645_badge.setText(f"DG645: {val_str}")
+            bg_color = "#4caf50" if val_str == "CONNECTED" else "#f44336"
+            self.dg645_badge.setStyleSheet(f"background-color: {bg_color}; color: white; padding: 8px; border-radius: 4px;")
 
         elif key == "CameraStatus":
-            self.cam_label.setText(val_str)
-            bg = "#4caf50" if val_str == "CONNECTED" else "#f44336"
-            self.cam_label.setStyleSheet(f"background-color: {bg}; color: white; border-radius: 8px; padding: 10px;")
+            self.camera_badge.setText(f"Camera: {val_str}")
+            bg_color = "#4caf50" if val_str == "CONNECTED" else "#f44336"
+            self.camera_badge.setStyleSheet(f"background-color: {bg_color}; color: white; padding: 8px; border-radius: 4px;")
 
         elif key == "ShotTarget":
             self.target_val.setText(val_str)
+
         elif key == "ShotNumber":
             self.shot_val.setText(val_str)
+
         elif key == "FileName":
             self.filename_val.setText(val_str)
-        elif key == "Arm":
-            self.arm_val.setText(val_str)
-        elif key == "ErrorMessage":
-            self.error_val.setText(val_str if val_str else "None")
-            if val_str:
-                self._add_log_entry(f"ERROR: {val_str}")
 
-    def _add_log_entry(self, msg):
-        timestamp = datetime.now().strftime("%H:%M:%S.%3f")[:-3]
-        item = QListWidgetItem(f"[{timestamp}] {msg}")
-        self.log_list.addItem(item)
-        self.log_list.scrollToBottom()
+        elif key == "ErrorMessage":
+            if val_str:
+                self.error_val.setText(val_str)
+                self.error_val.setStyleSheet("color: #f44336; font-weight: bold;")
+            else:
+                self.error_val.setText("None")
+                self.error_val.setStyleSheet("color: #4caf50;")
+
+    def _add_log_entry(self, message: str):
+        # Microseconds formatting fix (%f with [:-3] slicing)
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self.log_text.append(f"[{timestamp}] {message}")
 
     def closeEvent(self, event):
         self.worker.quit()
         self.worker.wait()
         super().closeEvent(event)
 
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     gui = PC2StatusGUIHardware()
     gui.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
