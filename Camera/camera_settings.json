@@ -1,7 +1,7 @@
 {
   "exposure_ms": 100.0,
   "gain_db": 0.0,
-  "local_save_dir": "c:\\Users\\USER\\Documents\\GitHub\\DAQ_CA\\Camera\\data_local",
+  "local_save_dir": "C:/Users/USER/Downloads/Test",
   "daq_save_dir": "C:/Users/USER/Downloads/Test",
-  "timestamp": "2026-10-01 14:18:56"
+  "timestamp": "2026-10-01 14:44:26"
 }

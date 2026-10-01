@@ -4,21 +4,17 @@ dual_gige_gui.py
 PyQt6 / PySide6 GUI front-end for Single GigE Point Grey Grasshopper2 Camera (Cam 0).
 Refactored for strict local vs. EPICS DAQ workflow separation.
 
-Key Features:
+Features:
 - Tab 1: Live View & Local Operations
-  - CW (Continuous Wave) 10 Hz streaming toggle.
-  - Dedicated "📸 Single Shot" button that automatically pauses CW acquisition.
-  - Manual Trigger Mode switch (Internal Free-Run vs. External Hardware TTL).
-  - Independent Local Free Saving (directory & file prefix, isolated from EPICS).
-  - Real-time 2D Gaussian beam analysis, ROI, target crosshair, and background subtraction.
+  - CW streaming toggle, single-shot grab, and local trigger control.
+  - Live background subtraction option for display viewports.
+  - Snapshot background recording directly using current frame memory.
 - Tab 2: EPICS DAQ Mode
-  - Automatic forced switch to External Hardware Trigger mode upon entering DAQ mode.
-  - EPICS IOC Network & Hardware Mode Status Banner strictly bound to Cam 0 (REAL vs SIMULATED).
-  - Dedicated DAQ Acquired Frame Viewport for instant shot inspection.
-  - Live readouts for Sequence State, Shot Counter, and Active DAQ Filename.
-  - Automated background frame saving on SAVING state using EPICS PV metadata.
+  - Hardware status banner & auto sequence handling.
+  - Separate raw shot & attached background persistence.
 - Tab 3: System & Event Log
-  - Rich-text System & DAQ Event Log console with Qt Thread-safe Signal communication.
+  - Real-time hardware status readbacks (Exposure, FPS, Gain, IP Address, Pixel Format).
+  - Rich-text System & DAQ Event Log console.
 """
 
 from __future__ import annotations
@@ -33,7 +29,6 @@ from typing import Optional
 import numpy as np
 import tifffile
 
-# Qt backend detection (PyQt6 / PySide6)
 try:
     from PyQt6 import QtCore, QtGui, QtWidgets
     from PyQt6.QtCore import (
@@ -64,7 +59,6 @@ from ioc_gige_driver import DualGigECameraController
 
 logger = logging.getLogger(__name__)
 
-# PyQtGraph global settings
 pg.setConfigOptions(
     imageAxisOrder="row-major",
     antialias=True,
@@ -73,7 +67,6 @@ pg.setConfigOptions(
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_settings.json")
 
-# Modern Dark CSS Theme
 _STYLE = """
 QMainWindow, QWidget {
     background-color: #0f1117;
@@ -187,8 +180,6 @@ QTabBar::tab:selected {
 
 
 class CameraGrabberThread(QThread):
-    """Background thread grabbing frames exclusively for Camera 0."""
-    
     frame_ready = Signal(object)
 
     def __init__(self, controller: DualGigECameraController):
@@ -220,7 +211,6 @@ class CameraGrabberThread(QThread):
 
 
 class SingleGigECameraGUI(QMainWindow):
-    # Thread-safe Qt Signal for EPICS state changes
     epics_state_changed = Signal(str)
 
     def __init__(self, force_mock: bool = False):
@@ -229,16 +219,13 @@ class SingleGigECameraGUI(QMainWindow):
         self.resize(1150, 850)
         self.setStyleSheet(_STYLE)
 
-        # State Variables
         self.is_cw_running = True
         self.latest_frame: Optional[np.ndarray] = None
         self.latest_fit: Optional[GaussianFitResult] = None
 
-        # EPICS State tracking
         self._epics_state_pv = None
         self._last_epics_state = None
 
-        # Controller Initialization (Cam 0 Only)
         self.controller = DualGigECameraController(
             serial_0=0,
             name_0="Cam_0",
@@ -247,19 +234,13 @@ class SingleGigECameraGUI(QMainWindow):
 
         self._init_ui()
         self._load_settings()
-
-        # Connect & start Cam 0
         self._connect_camera()
-
-        # Setup EPICS Listeners
         self._setup_epics_listeners()
 
-        # 10 Hz Timer for UI rendering
         self.display_timer = QTimer(self)
         self.display_timer.setInterval(100)
         self.display_timer.timeout.connect(self._on_display_tick)
 
-        # Start Grabber Thread
         self.grabber_thread = CameraGrabberThread(self.controller)
         self.grabber_thread.frame_ready.connect(self._on_frame_received)
         self.grabber_thread.start()
@@ -272,21 +253,17 @@ class SingleGigECameraGUI(QMainWindow):
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(8)
 
-        # Tab Widget
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        # --- TAB 1: Live View & Local Operations ---
         self.tab_local = QWidget()
         self._build_tab_local(self.tab_local)
         self.tabs.addTab(self.tab_local, "🎥 Live View & Local Operations")
 
-        # --- TAB 2: EPICS DAQ Mode ---
         self.tab_epics = QWidget()
         self._build_tab_epics(self.tab_epics)
         self.tabs.addTab(self.tab_epics, "⚡ EPICS DAQ Mode")
 
-        # --- TAB 3: System & Event Log ---
         self.tab_log = QWidget()
         self._build_tab_log(self.tab_log)
         self.tabs.addTab(self.tab_log, "📜 System & Event Log")
@@ -294,16 +271,11 @@ class SingleGigECameraGUI(QMainWindow):
         main_layout.addWidget(self.tabs)
         self.statusBar().showMessage("System Ready | Camera 0 Active")
 
-    # -------------------------------------------------------------------------
-    # Tab 1: Live View & Local Operations
-    # -------------------------------------------------------------------------
-
     def _build_tab_local(self, parent: QWidget):
         layout = QVBoxLayout(parent)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        # Top Control Bar
         ctrl_bar = QHBoxLayout()
 
         self.btn_cw_toggle = QPushButton("Stop CW Acquisition")
@@ -333,7 +305,6 @@ class SingleGigECameraGUI(QMainWindow):
 
         layout.addLayout(ctrl_bar)
 
-        # Viewport Graphics Layout
         self.gl_layout = pg.GraphicsLayoutWidget()
         self.gl_layout.setBackground("#000000")
         self.view = self.gl_layout.addViewBox(row=0, col=0, lockAspect=True, enableMouse=True)
@@ -349,18 +320,15 @@ class SingleGigECameraGUI(QMainWindow):
 
         layout.addWidget(self.gl_layout, stretch=1)
 
-        # Mouse Tracker Bar
         self.coord_label = QLabel("Cursor: (X: ----, Y: ----) | Intensity: ---- ADU")
         self.coord_label.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 11px;")
         layout.addWidget(self.coord_label)
 
         self._init_graphics_overlays()
 
-        # Local Diagnostics & Controls Group
         bottom_group = QGroupBox("Local Diagnostics & Independent File Saving")
         b_layout = QVBoxLayout(bottom_group)
 
-        # Row 1: Exposure & Gain
         r1 = QHBoxLayout()
         r1.addWidget(QLabel("Exposure (ms):"))
         self.exp_spin = QDoubleSpinBox()
@@ -378,6 +346,11 @@ class SingleGigECameraGUI(QMainWindow):
         self.gain_spin.valueChanged.connect(self._on_gain_changed)
         r1.addWidget(self.gain_spin)
 
+        self.sub_bg_check = QCheckBox("Subtract BG on Display")
+        self.sub_bg_check.setChecked(True)
+        self.sub_bg_check.setToolTip("Subtract recorded background for live and DAQ viewports without altering raw stored data.")
+        r1.addWidget(self.sub_bg_check)
+
         self.target_check = QCheckBox("Show Target Circle")
         self.target_check.setChecked(True)
         self.target_check.stateChanged.connect(self._on_target_toggle)
@@ -394,7 +367,6 @@ class SingleGigECameraGUI(QMainWindow):
 
         b_layout.addLayout(r1)
 
-        # Row 2: Local File Path & Save Controls (ISOLATED FROM EPICS)
         r2 = QHBoxLayout()
         r2.addWidget(QLabel("Local Save Dir:"))
         default_local_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_local")
@@ -428,7 +400,6 @@ class SingleGigECameraGUI(QMainWindow):
 
         b_layout.addLayout(r2)
 
-        # Fit Result Label
         self.fit_result_label = QLabel("Fit: [Not Analyzed]")
         self.fit_result_label.setStyleSheet("color: #a7f3d0; font-family: monospace; font-size: 11px;")
         b_layout.addWidget(self.fit_result_label)
@@ -436,7 +407,6 @@ class SingleGigECameraGUI(QMainWindow):
         layout.addWidget(bottom_group)
 
     def _init_graphics_overlays(self):
-        # Target Circle Overlay
         self.target_circle = pg.CircleROI([762, 562], [100, 100], pen=pg.mkPen("#38bdf8", width=1.5, style=Qt.PenStyle.DashLine))
         self.target_circle.setZValue(10)
         self.view.addItem(self.target_circle)
@@ -447,36 +417,28 @@ class SingleGigECameraGUI(QMainWindow):
         self.view.addItem(self.crosshair_h)
         self.target_circle.sigRegionChanged.connect(self._update_crosshair_pos)
 
-        # ROI Box for Fitting
         self.roi_box = pg.RectROI([612, 412], [400, 400], pen=pg.mkPen("#f59e0b", width=1.5))
         self.roi_box.addScaleHandle([1, 1], [0, 0])
         self.roi_box.addScaleHandle([0, 0], [1, 1])
         self.roi_box.setZValue(9)
         self.view.addItem(self.roi_box)
 
-        # Fitted Centroid Marker
         self.fit_marker = pg.ScatterPlotItem(size=12, pen=pg.mkPen("#ef4444", width=2), brush=pg.mkBrush("#ef4444"))
         self.fit_marker.setZValue(12)
         self.view.addItem(self.fit_marker)
 
         self.proxy = pg.SignalProxy(self.gl_layout.scene().sigMouseMoved, rateLimit=30, slot=self._on_mouse_moved)
 
-    # -------------------------------------------------------------------------
-    # Tab 2: EPICS DAQ Mode
-    # -------------------------------------------------------------------------
-
     def _build_tab_epics(self, parent: QWidget):
         layout = QVBoxLayout(parent)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
 
-        # Top EPICS Network Banner
         self.epics_banner_label = QLabel("EPICS IOC: DISCONNECTED | Mode: UNKNOWN")
         self.epics_banner_label.setStyleSheet("background-color: #f44336; color: white; font-weight: bold; font-size: 14px; padding: 10px; border-radius: 6px;")
         self.epics_banner_label.setAlignment(Qt.AlignmentFlag.AlignCenter if hasattr(Qt, "AlignmentFlag") else Qt.AlignCenter)
         layout.addWidget(self.epics_banner_label)
 
-        # EPICS Sequence & PV Status Board
         pv_group = QGroupBox("EPICS Channel Access PV Status Readouts")
         f_layout = QFormLayout(pv_group)
 
@@ -502,7 +464,6 @@ class SingleGigECameraGUI(QMainWindow):
 
         layout.addWidget(pv_group)
 
-        # EPICS DAQ Auto-Save Configuration
         daq_group = QGroupBox("EPICS Automated Sequence Save Configuration")
         daq_layout = QVBoxLayout(daq_group)
 
@@ -525,7 +486,6 @@ class SingleGigECameraGUI(QMainWindow):
 
         layout.addWidget(daq_group)
 
-        # EPICS Acquired Image Display Viewport
         daq_img_group = QGroupBox("EPICS DAQ Acquired Frame Viewport")
         daq_img_layout = QVBoxLayout(daq_img_group)
 
@@ -545,14 +505,35 @@ class SingleGigECameraGUI(QMainWindow):
         daq_img_layout.addWidget(self.daq_gl_layout)
         layout.addWidget(daq_img_group, stretch=1)
 
-    # -------------------------------------------------------------------------
-    # Tab 3: System & Event Log
-    # -------------------------------------------------------------------------
-
     def _build_tab_log(self, parent: QWidget):
         layout = QVBoxLayout(parent)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(12)
+
+        hw_group = QGroupBox("Actual Camera Hardware Parameters (System Tab)")
+        hw_layout = QFormLayout(hw_group)
+
+        self.lbl_hw_ip = QLabel("0.0.0.0")
+        self.lbl_hw_ip.setStyleSheet("color: #38bdf8; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Camera IP Address:", self.lbl_hw_ip)
+
+        self.lbl_hw_exp = QLabel("0.00 ms")
+        self.lbl_hw_exp.setStyleSheet("color: #f1f5f9; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Actual Exposure Time:", self.lbl_hw_exp)
+
+        self.lbl_hw_fps = QLabel("0.00 FPS")
+        self.lbl_hw_fps.setStyleSheet("color: #f1f5f9; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Actual Frame Rate:", self.lbl_hw_fps)
+
+        self.lbl_hw_gain = QLabel("0.00 dB")
+        self.lbl_hw_gain.setStyleSheet("color: #f1f5f9; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Actual Gain:", self.lbl_hw_gain)
+
+        self.lbl_hw_fmt = QLabel("MONO16")
+        self.lbl_hw_fmt.setStyleSheet("color: #10b981; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Pixel Format:", self.lbl_hw_fmt)
+
+        layout.addWidget(hw_group)
 
         log_group = QGroupBox("System & DAQ Event Log (全系統日誌)")
         log_layout = QVBoxLayout(log_group)
@@ -572,12 +553,7 @@ class SingleGigECameraGUI(QMainWindow):
 
         layout.addWidget(log_group, stretch=1)
 
-    # -------------------------------------------------------------------------
-    # System Event Logger & Helper Methods
-    # -------------------------------------------------------------------------
-
     def log(self, message: str, level: str = "INFO"):
-        """System-wide colored event logger supporting HTML rich-text formatting."""
         timestamp = time.strftime("%H:%M:%S")
         color_map = {
             "INFO": "#dcdcdc",
@@ -594,12 +570,10 @@ class SingleGigECameraGUI(QMainWindow):
         self.daq_log_edit.moveCursor(QtGui.QTextCursor.MoveOperation.End if hasattr(QtGui, "QTextCursor") else QtGui.QTextCursor.End)
 
     def _clear_log(self):
-        """Clear event log console."""
         self.daq_log_edit.clear()
         self.log("Event log cleared.")
 
     def log_daq(self, message: str):
-        """Backward compatibility alias for log()."""
         self.log(message, "INFO")
 
     def _update_crosshair_pos(self):
@@ -624,9 +598,8 @@ class SingleGigECameraGUI(QMainWindow):
         self.coord_label.setText("Cursor: (X: ----, Y: ----) | Intensity: ---- ADU")
 
     def _on_tab_changed(self, index: int):
-        """When switching to Tab 2 (EPICS DAQ Mode), force EXTERNAL_TTL trigger mode."""
-        if index == 1:  # EPICS DAQ Tab
-            self.trigger_combo.setCurrentIndex(1)  # Force EXTERNAL_TTL
+        if index == 1:
+            self.trigger_combo.setCurrentIndex(1)
             self.controller.set_trigger_mode("EXTERNAL_TTL")
             self.statusBar().showMessage("Switched to EPICS DAQ Mode -> Locked to EXTERNAL_TTL Trigger")
             self.log("Entered EPICS DAQ Mode: Enforced EXTERNAL_TTL trigger mode.", "INFO")
@@ -653,8 +626,19 @@ class SingleGigECameraGUI(QMainWindow):
             self.status_badge.setStyleSheet("color: #10b981; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
             self.log("CW Acquisition STARTED.", "SUCCESS")
 
+    def _get_display_frame(self, raw_frame: np.ndarray) -> np.ndarray:
+        """Compute background-subtracted frame for viewport rendering."""
+        if not self.sub_bg_check.isChecked():
+            return raw_frame
+
+        bg = self.controller.get_background(0)
+        if bg is None or bg.shape != raw_frame.shape:
+            return raw_frame
+
+        subtracted = np.clip(raw_frame.astype(np.float32) - bg.astype(np.float32), 0, 65535).astype(np.uint16)
+        return subtracted
+
     def _on_single_shot_click(self):
-        """Grab a single frame directly from Cam 0; automatically stops CW stream if running."""
         if self.is_cw_running:
             self._on_toggle_cw()
             self.log("Single shot triggered: Automatically paused CW acquisition.", "INFO")
@@ -673,7 +657,8 @@ class SingleGigECameraGUI(QMainWindow):
 
             if frame is not None:
                 self.latest_frame = frame
-                self.img_item.setImage(frame, autoLevels=False)
+                disp_frame = self._get_display_frame(frame)
+                self.img_item.setImage(disp_frame, autoLevels=False)
                 self.status_badge.setText("● SINGLE SHOT")
                 self.status_badge.setStyleSheet("color: #38bdf8; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
                 self.statusBar().showMessage("📸 Single shot grabbed successfully (CW Paused).")
@@ -707,15 +692,22 @@ class SingleGigECameraGUI(QMainWindow):
         self.roi_box.setVisible(bool(state))
 
     def _on_record_bg(self):
+        """Record background using current display frame snapshot."""
+        if self.latest_frame is None:
+            self.log("Record BG failed: No frame available in memory.", "WARNING")
+            QMessageBox.warning(self, "Background", "No frame available to set as background.")
+            return
+
         try:
-            bg = self.controller.record_background(0, num_averages=3)
-            mean_bg = float(np.mean(bg))
+            bg_snapshot = self.latest_frame.copy()
+            self.controller.set_background(0, bg_snapshot)
+            mean_bg = float(np.mean(bg_snapshot))
             self.bg_status_label.setText(f"BG: [Mean {mean_bg:.1f}]")
             self.bg_status_label.setStyleSheet("color: #10b981; font-weight: bold;")
-            self.log(f"Background recorded (3 averages). Mean intensity: {mean_bg:.1f} ADU", "SUCCESS")
-            QMessageBox.information(self, "Background", f"Cam 0 Background recorded.\nMean: {mean_bg:.1f} ADU")
+            self.log(f"Background recorded from active snapshot. Mean intensity: {mean_bg:.1f} ADU", "SUCCESS")
+            QMessageBox.information(self, "Background Recorded", f"Current frame set as background.\nMean: {mean_bg:.1f} ADU")
         except Exception as e:
-            self.log(f"Background recording failed: {e}", "ERROR")
+            self.log(f"Background setting failed: {e}", "ERROR")
             QMessageBox.critical(self, "Background Error", str(e))
 
     def _on_analyze(self):
@@ -757,7 +749,6 @@ class SingleGigECameraGUI(QMainWindow):
             self.daq_dir_edit.setText(d)
 
     def _on_save_local_shot(self):
-        """Save shot locally without affecting or reading EPICS PVs."""
         if self.latest_frame is None:
             self.log("Local Save aborted: No frame in memory.", "WARNING")
             QMessageBox.warning(self, "Save Local", "No frame available.")
@@ -792,12 +783,7 @@ class SingleGigECameraGUI(QMainWindow):
             self.log(f"Local save failed: {e}", "ERROR")
             QMessageBox.critical(self, "Save Error", str(e))
 
-    # -------------------------------------------------------------------------
-    # EPICS Integration & Background Auto-Saving (Strictly Cam 0)
-    # -------------------------------------------------------------------------
-
     def _connect_camera(self):
-        """Connect to Camera 0 exclusively and publish its true hardware mode."""
         c0, _ = self.controller.connect_all()
         self.controller.start_capture_all()
 
@@ -835,7 +821,6 @@ class SingleGigECameraGUI(QMainWindow):
             self.log(f"Failed to subscribe to EPICS state PV: {e}", "WARNING")
 
     def _on_epics_state_change(self, pvname=None, value=None, **kwargs):
-        """Executed inside PyEpics C-CA thread -> safely emits Qt Signal to main UI thread."""
         if value is not None:
             state_str = str(value)
             self.epics_state_changed.emit(state_str)
@@ -843,7 +828,6 @@ class SingleGigECameraGUI(QMainWindow):
     def _handle_epics_auto_sequence(self, new_state: str):
         self.pv_state_label.setText(new_state)
 
-        # 1. Read latest PV metadata from EPICS
         try:
             import epics
             fn_val = epics.caget("EXP:Seq:FileName", as_string=True)
@@ -858,13 +842,11 @@ class SingleGigECameraGUI(QMainWindow):
             fn, sn = "exp_run", 0
             self.log(f"Failed reading EPICS PVs: {e}", "WARNING")
 
-        # Edge detection safeguard
         if new_state == self._last_epics_state:
             return
 
         self.log(f"EPICS State Transition: {self._last_epics_state} -> {new_state}", "INFO")
 
-        # 2. Sequence state machine for Cam 0
         if new_state == "ARMED":
             self.controller.set_trigger_mode("EXTERNAL_TTL")
             self.controller.start_capture_all()
@@ -883,10 +865,15 @@ class SingleGigECameraGUI(QMainWindow):
                 filepath = os.path.join(target_dir, filename)
 
                 if self.latest_frame is not None:
-                    tifffile.imwrite(filepath, self.latest_frame)
-                    # Render acquired frame on Tab 2 DAQ viewport
-                    self.daq_img_item.setImage(self.latest_frame, autoLevels=False)
-                    self.log(f"💾 [SAVING AUTO-SAVE] Saved DAQ frame: {filepath}", "SUCCESS")
+                    self.controller.save_tiff_with_metadata(
+                        filepath=filepath,
+                        index=0,
+                        image_data=self.latest_frame,
+                    )
+
+                    disp_frame = self._get_display_frame(self.latest_frame)
+                    self.daq_img_item.setImage(disp_frame, autoLevels=False)
+                    self.log(f"💾 [SAVING AUTO-SAVE] Saved DAQ raw frame & background: {filepath}", "SUCCESS")
                 else:
                     self.log("❌ [SAVING ERROR] No image frame in buffer to save!", "ERROR")
             except Exception as e:
@@ -900,11 +887,19 @@ class SingleGigECameraGUI(QMainWindow):
             self.latest_frame = frame
 
     def _on_display_tick(self):
+        hw_info = self.controller.get_actual_status(0)
+        self.lbl_hw_ip.setText(str(hw_info.get("ip_address", "N/A")))
+        self.lbl_hw_exp.setText(f"{hw_info.get('exposure_ms', 0.0):.2f} ms")
+        self.lbl_hw_fps.setText(f"{hw_info.get('frame_rate_fps', 0.0):.2f} FPS")
+        self.lbl_hw_gain.setText(f"{hw_info.get('gain_db', 0.0):.2f} dB")
+        self.lbl_hw_fmt.setText(str(hw_info.get("pixel_format", "N/A")))
+
         if not self.is_cw_running:
             return
 
         if self.latest_frame is not None:
-            self.img_item.setImage(self.latest_frame, autoLevels=False)
+            disp_frame = self._get_display_frame(self.latest_frame)
+            self.img_item.setImage(disp_frame, autoLevels=False)
 
     def _load_settings(self):
         if os.path.exists(SETTINGS_FILE):
@@ -945,7 +940,6 @@ class SingleGigECameraGUI(QMainWindow):
         event.accept()
 
 
-# Maintain class alias for backward compatibility
 DualGigECameraGUI = SingleGigECameraGUI
 
 

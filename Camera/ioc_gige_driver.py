@@ -5,14 +5,11 @@ Single GigE Camera Driver & Controller for Point Grey / FLIR Grasshopper2 camera
 Supports ctypes (FlyCapture2_C.dll), PyCapture2, and Mock fallback mode for offline DAQ development.
 
 Features:
-- SingleGigECameraController managing Cam 0 exclusively (no dual-camera overhead).
+- SingleGigECameraController managing Cam 0 exclusively.
 - Unified trigger mode management (INTERNAL/OFF vs EXTERNAL_TTL).
-- Background capture, RAM buffer pre-allocation, and memory persistence.
+- Snapshot background assignment and RAM buffer pre-allocation.
 - TIFF persistence with embedded metadata tags (ImageDescription JSON + background data).
 - Backward-compatible class alias for DualGigECameraController.
-
-Author : Antigravity DAQ Module
-Date   : 2026-10-01
 """
 
 from __future__ import annotations
@@ -26,7 +23,6 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import tifffile
 
-# Import base Grasshopper2Driver if available
 try:
     from pg_camera_driver import Grasshopper2Driver, FC2_ERROR_OK
 except ImportError:
@@ -101,7 +97,6 @@ class MockCameraDriver:
         
         self._frame_count += 1
         
-        # Synthesize realistic beam image with noise
         y = np.arange(self.SENSOR_HEIGHT, dtype=np.float32)
         x = np.arange(self.SENSOR_WIDTH, dtype=np.float32)
         yy, xx = np.meshgrid(y, x, indexing='ij')
@@ -131,6 +126,16 @@ class MockCameraDriver:
             "firmware": "v1.0.0-mock",
         }
 
+    def get_camera_status_info(self) -> dict:
+        """Return simulated hardware status parameters."""
+        return {
+            "exposure_ms": self.exposure_s * 1000.0,
+            "frame_rate_fps": self.fps,
+            "gain_db": self.gain_db,
+            "ip_address": "192.168.1.100 (Mock)",
+            "pixel_format": "MONO16 (Mock)",
+        }
+
 
 class SingleGigECameraController:
     """
@@ -141,9 +146,9 @@ class SingleGigECameraController:
     def __init__(
         self,
         serial_0: int = 0,
-        serial_1: int = 0,  # Preserved for signature compatibility
+        serial_1: int = 0,
         name_0: str = "Cam_0",
-        name_1: str = "Disabled",  # Preserved for signature compatibility
+        name_1: str = "Disabled",
         force_mock: bool = False,
     ):
         self.channel_names = [name_0]
@@ -158,13 +163,11 @@ class SingleGigECameraController:
 
     @property
     def is_mock(self) -> bool:
-        """Returns True if Cam 0 is running on Mock driver."""
         if self.drivers and hasattr(self.drivers[0], 'is_mock'):
             return self.drivers[0].is_mock
         return False
 
     def _init_driver(self) -> None:
-        """Initialize Cam 0 camera driver with real hardware or fallback mock."""
         self.drivers = []
         serial = self.serials[0]
         name = self.channel_names[0]
@@ -177,11 +180,9 @@ class SingleGigECameraController:
             except Exception as e:
                 logger.warning("Failed to initialize physical camera driver Cam 0: %s. Using Mock.", e)
         
-        # Fallback to Mock driver
         self.drivers.append(MockCameraDriver(serial=serial, name=name))
 
     def connect_all(self) -> Tuple[bool, bool]:
-        """Connect Camera 0. Returns (connected_0, False)."""
         drv = self.drivers[0]
         c0 = False
         try:
@@ -198,7 +199,6 @@ class SingleGigECameraController:
         return (c0, False)
 
     def disconnect_all(self) -> None:
-        """Disconnect Camera 0."""
         for drv in self.drivers:
             try:
                 if getattr(drv, "is_capturing", False):
@@ -209,48 +209,35 @@ class SingleGigECameraController:
                 logger.error("Error disconnecting camera: %s", e)
 
     def start_capture_all(self) -> None:
-        """Start acquisition on Camera 0."""
         for drv in self.drivers:
             if getattr(drv, "is_connected", False) and not getattr(drv, "is_capturing", False):
                 drv.start_capture()
 
     def stop_capture_all(self) -> None:
-        """Stop acquisition on Camera 0."""
         for drv in self.drivers:
             if getattr(drv, "is_capturing", False):
                 drv.stop_capture()
 
     def set_channel_name(self, index: int, name: str) -> None:
-        """Update channel name for Camera 0."""
         self.channel_names[0] = name
         if isinstance(self.drivers[0], MockCameraDriver):
             self.drivers[0].name = name
 
     def set_exposure_time(self, index: int, seconds: float) -> None:
-        """Set exposure time in seconds for Camera 0."""
         if self.drivers:
             self.drivers[0].set_exposure_time(seconds)
 
     def set_gain(self, index: int, gain_db: float) -> None:
-        """Set gain in dB for Camera 0."""
         if self.drivers:
             self.drivers[0].set_gain(gain_db)
 
     def set_trigger_mode(self, mode: str) -> None:
-        """
-        Set trigger mode for Camera 0.
-        
-        Parameters
-        ----------
-        mode : "EXTERNAL_TTL" or "INTERNAL/OFF"
-        """
         enabled = (mode.upper() == "EXTERNAL_TTL")
         if self.drivers and getattr(self.drivers[0], "is_connected", False):
             self.drivers[0].set_trigger_mode(enabled=enabled)
         logger.info("GigECameraController trigger mode set to: %s", mode)
 
     def allocate_ram_buffer(self, shot_count: int) -> None:
-        """Pre-allocate zero-copy RAM buffer for Camera 0."""
         if shot_count <= 0:
             raise ValueError("shot_count must be positive.")
         
@@ -258,8 +245,13 @@ class SingleGigECameraController:
         self.ram_buffers = [np.zeros((shot_count, h, w), dtype=np.uint16)]
         logger.info("Allocated RAM buffer for %d shots (shape: %s).", shot_count, self.ram_buffers[0].shape)
 
+    def set_background(self, index: int = 0, bg_frame: Optional[np.ndarray] = None) -> None:
+        """Assign an existing image array directly as background without re-acquisition."""
+        if bg_frame is not None:
+            self.background_buffers[0] = bg_frame.copy()
+            logger.info("Camera 0 (%s) background set from snapshot (mean: %.1f).", self.channel_names[0], float(np.mean(bg_frame)))
+
     def record_background(self, index: int = 0, num_averages: int = 1) -> np.ndarray:
-        """Capture raw background frame from Camera 0."""
         drv = self.drivers[0]
         if not getattr(drv, "is_capturing", False):
             raise RuntimeError("Camera 0 is not capturing.")
@@ -276,19 +268,28 @@ class SingleGigECameraController:
         return avg_bg
 
     def get_background(self, index: int = 0) -> Optional[np.ndarray]:
-        """Get stored background array for Camera 0."""
         return self.background_buffers[0]
 
     def clear_background(self, index: int = 0) -> None:
-        """Clear recorded background array for Camera 0."""
         self.background_buffers[0] = None
 
+    def get_actual_status(self, index: int = 0) -> dict:
+        """Query physical driver for actual hardware values."""
+        drv = self.drivers[0]
+        if hasattr(drv, "get_camera_status_info"):
+            return drv.get_camera_status_info()
+        return {
+            "exposure_ms": 0.0,
+            "frame_rate_fps": 0.0,
+            "gain_db": 0.0,
+            "ip_address": "0.0.0.0",
+            "pixel_format": "N/A",
+        }
+
     def grab_frame(self, index: int = 0) -> np.ndarray:
-        """Grab a single raw frame from Camera 0."""
         return self.drivers[0].grab_frame_numpy()
 
     def get_latest_frames(self) -> Tuple[Optional[np.ndarray], None]:
-        """Get latest frame for Camera 0."""
         try:
             f0 = self.grab_frame(0)
             return (f0, None)
@@ -304,7 +305,6 @@ class SingleGigECameraController:
         extra_metadata: Optional[dict] = None,
         embed_background: bool = True,
     ) -> str:
-        """Save shot array to a TIFF file with metadata."""
         drv = self.drivers[0]
         exposure_s = getattr(drv, "exposure_s", getattr(drv, "DEFAULT_EXPOSURE_S", 0.1))
         gain_db = getattr(drv, "gain_db", getattr(drv, "DEFAULT_GAIN_DB", 0.0))
@@ -362,5 +362,4 @@ class SingleGigECameraController:
         return os.path.abspath(filepath)
 
 
-# Backward compatibility alias
 DualGigECameraController = SingleGigECameraController
