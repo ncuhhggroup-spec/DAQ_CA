@@ -60,7 +60,7 @@ except ImportError:
 import pyqtgraph as pg
 
 from camera_analysis import fit_2d_gaussian, GaussianFitResult
-from dual_gige_driver import DualGigECameraController
+from ioc_gige_driver import DualGigECameraController
 
 logger = logging.getLogger(__name__)
 
