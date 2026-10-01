@@ -14,8 +14,10 @@ Key Features:
 - Tab 2: EPICS DAQ Mode
   - Automatic forced switch to External Hardware Trigger mode upon entering DAQ mode.
   - EPICS IOC Network & Hardware Mode Status Banner strictly bound to Cam 0 (REAL vs SIMULATED).
+  - Dedicated DAQ Acquired Frame Viewport for instant shot inspection.
   - Live readouts for Sequence State, Shot Counter, and Active DAQ Filename.
   - Automated background frame saving on SAVING state using EPICS PV metadata.
+- Tab 3: System & Event Log
   - Rich-text System & DAQ Event Log console with Qt Thread-safe Signal communication.
 """
 
@@ -203,7 +205,6 @@ class CameraGrabberThread(QThread):
                     break
             
             try:
-                # 簡化：直接抓取 Cam 0 影格
                 f0 = self.controller.grab_frame(0)
                 if f0 is not None:
                     self.frame_ready.emit(f0)
@@ -297,85 +298,142 @@ class SingleGigECameraGUI(QMainWindow):
     # Tab 1: Live View & Local Operations
     # -------------------------------------------------------------------------
 
-    def _build_tab_epics(self, parent: QWidget):
+    def _build_tab_local(self, parent: QWidget):
         layout = QVBoxLayout(parent)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
-        # Top EPICS Network Banner
-        self.epics_banner_label = QLabel("EPICS IOC: DISCONNECTED | Mode: UNKNOWN")
-        self.epics_banner_label.setStyleSheet("background-color: #f44336; color: white; font-weight: bold; font-size: 14px; padding: 10px; border-radius: 6px;")
-        self.epics_banner_label.setAlignment(Qt.AlignmentFlag.AlignCenter if hasattr(Qt, "AlignmentFlag") else Qt.AlignCenter)
-        layout.addWidget(self.epics_banner_label)
+        # Top Control Bar
+        ctrl_bar = QHBoxLayout()
 
-        # EPICS Sequence & PV Status Board
-        pv_group = QGroupBox("EPICS Channel Access PV Status Readouts")
-        f_layout = QFormLayout(pv_group)
+        self.btn_cw_toggle = QPushButton("Stop CW Acquisition")
+        self.btn_cw_toggle.setObjectName("cwBtnRunning")
+        self.btn_cw_toggle.clicked.connect(self._on_toggle_cw)
+        ctrl_bar.addWidget(self.btn_cw_toggle)
 
-        self.pv_state_label = QLabel("IDLE")
-        self.pv_state_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 14px;")
-        f_layout.addRow("Sequence State (EXP:Seq:State):", self.pv_state_label)
+        self.btn_single_shot = QPushButton("📸 Single Shot")
+        self.btn_single_shot.setObjectName("singleShotBtn")
+        self.btn_single_shot.setToolTip("Grab a single frame (useful when CW is stopped)")
+        self.btn_single_shot.clicked.connect(self._on_single_shot_click)
+        ctrl_bar.addWidget(self.btn_single_shot)
 
-        self.pv_cam_mode_label = QLabel("SIMULATED")
-        self.pv_cam_mode_label.setStyleSheet("color: #f59e0b; font-weight: bold;")
-        f_layout.addRow("Camera Mode (EXP:Seq:CameraMode):", self.pv_cam_mode_label)
+        ctrl_bar.addSpacing(15)
 
-        self.pv_cam_status_label = QLabel("CONNECTED")
-        self.pv_cam_status_label.setStyleSheet("color: #10b981; font-weight: bold;")
-        f_layout.addRow("Camera Status (EXP:Seq:CameraStatus):", self.pv_cam_status_label)
+        ctrl_bar.addWidget(QLabel("Trigger Mode:"))
+        self.trigger_combo = QComboBox()
+        self.trigger_combo.addItems(["INTERNAL/OFF (Free-Run)", "EXTERNAL_TTL (Hardware Burst)"])
+        self.trigger_combo.currentIndexChanged.connect(self._on_local_trigger_changed)
+        ctrl_bar.addWidget(self.trigger_combo)
 
-        self.pv_filename_label = QLabel("exp_run")
-        self.pv_filename_label.setStyleSheet("color: #f1f5f9; font-weight: bold;")
-        f_layout.addRow("Active Filename (EXP:Seq:FileName):", self.pv_filename_label)
+        ctrl_bar.addStretch()
 
-        self.pv_shot_label = QLabel("0")
-        self.pv_shot_label.setStyleSheet("color: #f1f5f9; font-weight: bold;")
-        f_layout.addRow("Current Shot # (EXP:Seq:ShotNumber):", self.pv_shot_label)
+        self.status_badge = QLabel("● LIVE (CW)")
+        self.status_badge.setStyleSheet("color: #10b981; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
+        ctrl_bar.addWidget(self.status_badge)
 
-        layout.addWidget(pv_group)
+        layout.addLayout(ctrl_bar)
 
-        # EPICS DAQ Auto-Save Configuration
-        daq_group = QGroupBox("EPICS Automated Sequence Save Configuration")
-        daq_layout = QVBoxLayout(daq_group)
+        # Viewport Graphics Layout
+        self.gl_layout = pg.GraphicsLayoutWidget()
+        self.gl_layout.setBackground("#000000")
+        self.view = self.gl_layout.addViewBox(row=0, col=0, lockAspect=True, enableMouse=True)
+        self.view.invertY(True)
 
-        d_row = QHBoxLayout()
-        d_row.addWidget(QLabel("DAQ Auto-Save Dir:"))
-        default_daq_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_epics")
-        self.daq_dir_edit = QLineEdit(default_daq_dir)
-        d_row.addWidget(self.daq_dir_edit, stretch=1)
+        self.img_item = pg.ImageItem()
+        self.view.addItem(self.img_item)
 
-        btn_daq_browse = QPushButton("Browse...")
-        btn_daq_browse.setObjectName("browseBtn")
-        btn_daq_browse.clicked.connect(self._on_browse_daq_dir)
-        d_row.addWidget(btn_daq_browse)
+        self.hist_lut = pg.HistogramLUTItem(self.img_item)
+        self.hist_lut.gradient.loadPreset("inferno")
+        self.gl_layout.addItem(self.hist_lut, row=0, col=1)
+        self.hist_lut.setMaximumWidth(110)
 
-        daq_layout.addLayout(d_row)
+        layout.addWidget(self.gl_layout, stretch=1)
 
-        info_lbl = QLabel("Note: In EPICS DAQ Mode, the camera is automatically locked to EXTERNAL_TTL trigger mode.\nFrames are captured upon DG645 pulse and saved automatically during SAVING state using EPICS PV metadata.")
-        info_lbl.setStyleSheet("color: #94a3b8; font-style: italic;")
-        daq_layout.addWidget(info_lbl)
+        # Mouse Tracker Bar
+        self.coord_label = QLabel("Cursor: (X: ----, Y: ----) | Intensity: ---- ADU")
+        self.coord_label.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 11px;")
+        layout.addWidget(self.coord_label)
 
-        layout.addWidget(daq_group)
+        self._init_graphics_overlays()
 
-        # EPICS Acquired Image Display Viewport
-        daq_img_group = QGroupBox("EPICS DAQ Acquired Frame Viewport")
-        daq_img_layout = QVBoxLayout(daq_img_group)
+        # Local Diagnostics & Controls Group
+        bottom_group = QGroupBox("Local Diagnostics & Independent File Saving")
+        b_layout = QVBoxLayout(bottom_group)
 
-        self.daq_gl_layout = pg.GraphicsLayoutWidget()
-        self.daq_gl_layout.setBackground("#000000")
-        self.daq_view = self.daq_gl_layout.addViewBox(row=0, col=0, lockAspect=True, enableMouse=True)
-        self.daq_view.invertY(True)
+        # Row 1: Exposure & Gain
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("Exposure (ms):"))
+        self.exp_spin = QDoubleSpinBox()
+        self.exp_spin.setRange(0.1, 5000.0)
+        self.exp_spin.setValue(100.0)
+        self.exp_spin.setSingleStep(5.0)
+        self.exp_spin.valueChanged.connect(self._on_exposure_changed)
+        r1.addWidget(self.exp_spin)
 
-        self.daq_img_item = pg.ImageItem()
-        self.daq_view.addItem(self.daq_img_item)
+        r1.addWidget(QLabel("Gain (dB):"))
+        self.gain_spin = QDoubleSpinBox()
+        self.gain_spin.setRange(0.0, 24.0)
+        self.gain_spin.setValue(0.0)
+        self.gain_spin.setSingleStep(0.5)
+        self.gain_spin.valueChanged.connect(self._on_gain_changed)
+        r1.addWidget(self.gain_spin)
 
-        self.daq_hist_lut = pg.HistogramLUTItem(self.daq_img_item)
-        self.daq_hist_lut.gradient.loadPreset("inferno")
-        self.daq_gl_layout.addItem(self.daq_hist_lut, row=0, col=1)
-        self.daq_hist_lut.setMaximumWidth(110)
+        self.target_check = QCheckBox("Show Target Circle")
+        self.target_check.setChecked(True)
+        self.target_check.stateChanged.connect(self._on_target_toggle)
+        r1.addWidget(self.target_check)
 
-        daq_img_layout.addWidget(self.daq_gl_layout)
-        layout.addWidget(daq_img_group, stretch=1)
+        self.roi_check = QCheckBox("Show ROI Box")
+        self.roi_check.setChecked(True)
+        self.roi_check.stateChanged.connect(self._on_roi_toggle)
+        r1.addWidget(self.roi_check)
+
+        self.bg_status_label = QLabel("BG: [None]")
+        self.bg_status_label.setStyleSheet("color: #f59e0b; font-weight: bold;")
+        r1.addWidget(self.bg_status_label)
+
+        b_layout.addLayout(r1)
+
+        # Row 2: Local File Path & Save Controls (ISOLATED FROM EPICS)
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("Local Save Dir:"))
+        default_local_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_local")
+        self.local_dir_edit = QLineEdit(default_local_dir)
+        r2.addWidget(self.local_dir_edit, stretch=1)
+
+        btn_local_browse = QPushButton("Browse...")
+        btn_local_browse.setObjectName("browseBtn")
+        btn_local_browse.clicked.connect(self._on_browse_local_dir)
+        r2.addWidget(btn_local_browse)
+
+        r2.addWidget(QLabel("Prefix:"))
+        self.local_prefix_edit = QLineEdit("cam0_local")
+        self.local_prefix_edit.setMaximumWidth(120)
+        r2.addWidget(self.local_prefix_edit)
+
+        btn_record_bg = QPushButton("Record BG")
+        btn_record_bg.setObjectName("recordBgBtn")
+        btn_record_bg.clicked.connect(self._on_record_bg)
+        r2.addWidget(btn_record_bg)
+
+        btn_analyze = QPushButton("Analyze 2D Gaussian")
+        btn_analyze.setObjectName("analyzeBtn")
+        btn_analyze.clicked.connect(self._on_analyze)
+        r2.addWidget(btn_analyze)
+
+        btn_save_local = QPushButton("💾 Save Local Shot")
+        btn_save_local.setObjectName("saveBtn")
+        btn_save_local.clicked.connect(self._on_save_local_shot)
+        r2.addWidget(btn_save_local)
+
+        b_layout.addLayout(r2)
+
+        # Fit Result Label
+        self.fit_result_label = QLabel("Fit: [Not Analyzed]")
+        self.fit_result_label.setStyleSheet("color: #a7f3d0; font-family: monospace; font-size: 11px;")
+        b_layout.addWidget(self.fit_result_label)
+
+        layout.addWidget(bottom_group)
 
     def _init_graphics_overlays(self):
         # Target Circle Overlay
@@ -467,23 +525,27 @@ class SingleGigECameraGUI(QMainWindow):
 
         layout.addWidget(daq_group)
 
-        # System & DAQ Log Window
-        log_group = QGroupBox("System & DAQ Event Log (全系統日誌)")
-        log_layout = QVBoxLayout(log_group)
+        # EPICS Acquired Image Display Viewport
+        daq_img_group = QGroupBox("EPICS DAQ Acquired Frame Viewport")
+        daq_img_layout = QVBoxLayout(daq_img_group)
 
-        self.daq_log_edit = QTextEdit()
-        self.daq_log_edit.setReadOnly(True)
-        self.daq_log_edit.setStyleSheet("background-color: #1e1e1e; color: #dcdcdc; font-family: Consolas, monospace;")
-        log_layout.addWidget(self.daq_log_edit)
+        self.daq_gl_layout = pg.GraphicsLayoutWidget()
+        self.daq_gl_layout.setBackground("#000000")
+        self.daq_view = self.daq_gl_layout.addViewBox(row=0, col=0, lockAspect=True, enableMouse=True)
+        self.daq_view.invertY(True)
 
-        btn_clear_log = QPushButton("Clear Log")
-        btn_clear_log.setObjectName("browseBtn")
-        btn_clear_log.clicked.connect(self._clear_log)
-        log_layout.addWidget(btn_clear_log, alignment=Qt.AlignmentFlag.AlignRight if hasattr(Qt, "AlignmentFlag") else Qt.AlignRight)
+        self.daq_img_item = pg.ImageItem()
+        self.daq_view.addItem(self.daq_img_item)
 
-        layout.addWidget(log_group, stretch=1)
+        self.daq_hist_lut = pg.HistogramLUTItem(self.daq_img_item)
+        self.daq_hist_lut.gradient.loadPreset("inferno")
+        self.daq_gl_layout.addItem(self.daq_hist_lut, row=0, col=1)
+        self.daq_hist_lut.setMaximumWidth(110)
 
-# -------------------------------------------------------------------------
+        daq_img_layout.addWidget(self.daq_gl_layout)
+        layout.addWidget(daq_img_group, stretch=1)
+
+    # -------------------------------------------------------------------------
     # Tab 3: System & Event Log
     # -------------------------------------------------------------------------
 
@@ -741,7 +803,6 @@ class SingleGigECameraGUI(QMainWindow):
 
         try:
             import epics
-            # 直接讀取控制器對應 Cam 0 的 is_mock 屬性
             is_real = c0 and (not self.controller.is_mock)
             mode_str = "REAL" if is_real else "SIMULATED"
             stat_str = "CONNECTED" if c0 else "DISCONNECTED"
@@ -767,10 +828,7 @@ class SingleGigECameraGUI(QMainWindow):
     def _setup_epics_listeners(self):
         try:
             import epics
-            # Bind Qt Signal for thread-safe cross-thread UI updates
             self.epics_state_changed.connect(self._handle_epics_auto_sequence)
-            
-            # Subscribe to EPICS State PV
             self._epics_state_pv = epics.PV("EXP:Seq:State", callback=self._on_epics_state_change)
             self.log("Subscribed to EPICS PV: EXP:Seq:State", "INFO")
         except Exception as e:
@@ -826,7 +884,7 @@ class SingleGigECameraGUI(QMainWindow):
 
                 if self.latest_frame is not None:
                     tifffile.imwrite(filepath, self.latest_frame)
-                    # Automatically render acquired image on Tab 2 viewport
+                    # Render acquired frame on Tab 2 DAQ viewport
                     self.daq_img_item.setImage(self.latest_frame, autoLevels=False)
                     self.log(f"💾 [SAVING AUTO-SAVE] Saved DAQ frame: {filepath}", "SUCCESS")
                 else:
