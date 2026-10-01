@@ -1,0 +1,55 @@
+================================================================================
+                      EPICS DAQ SYSTEM ISSUE REPORT
+================================================================================
+Issue ID      : ISSUE-20261001-DG645-01
+Date          : 2026-10-01
+Component     : ca_server/ioc_server_hardware.py, DG645/dg645_gui.py
+Status        : RESOLVED
+Severity      : HIGH (Hardware Control Blocked)
+================================================================================
+
+1. PROBLEM DESCRIPTION
+--------------------------------------------------------------------------------
+During sequence execution (`ARMED` -> `ACQUIRING` -> `SAVING`), the EPICS IOC 
+Server successfully transitioned through all states and indicated `DG645Mode = REAL`. 
+However, the physical SRS DG645 Digital Delay Generator connected via RS-232 
+(COM5) failed to output physical TTL trigger pulses during the `ACQUIRING` phase.
+
+2. ROOT CAUSE ANALYSIS
+--------------------------------------------------------------------------------
+Two underlying issues caused the hardware automation failure:
+
+[Cause 1] EPICS PV Write Access Denied
+- Hardware Mode (`EXP:Seq:DG645Mode`) and Status (`EXP:Seq:DG645Status`) PVs 
+  were defined as `read_only=True` in `ca_server/ioc_server_hardware.py`.
+- When `dg645_gui.py` attempted to publish `REAL` mode upon serial connection,
+  the IOC Server rejected the `caput` request with `Write access denied`.
+
+[Cause 2] Missing EPICS State Event Listener & Auto-Trigger
+- `dg645_gui.py` only periodically polled PV values (`caget`) for UI display.
+- It lacked an event callback subscription (`epics.PV` listener) on `EXP:Seq:State`.
+- As a result, when the IOC Server transitioned `EXP:Seq:State` to `ACQUIRING`,
+  no automated RS-232 `*TRG` command was issued to the hardware.
+
+3. RESOLUTION & ACTION TAKEN
+--------------------------------------------------------------------------------
+[Fix 1] Updated IOC Server PV Permissions (`ca_server/ioc_server_hardware.py`)
+- Modified `EXP:Seq:DG645Status`, `EXP:Seq:DG645Mode`, `EXP:Seq:CameraStatus`, 
+  and `EXP:Seq:CameraMode` properties to `read_only=False`.
+- Allowed client GUIs to update hardware connection state dynamically.
+
+[Fix 2] Implemented State Listener & Auto-Trigger (`DG645/dg645_gui.py`)
+- Subscribed to `EXP:Seq:State` using `epics.PV` with background callbacks.
+- Implemented state transition edge-detection logic (`_handle_auto_trigger`).
+- Automatically executes `self.dg.arm_single_shot()` (`*TRG`) over RS-232 
+  immediately upon detecting `EXP:Seq:State == 'ACQUIRING'`.
+
+4. VERIFICATION & RESULTS
+--------------------------------------------------------------------------------
+- Verified EPICS Network Sync: `dg645_gui.py` successfully published `REAL` 
+  mode and `CONNECTED` status to the IOC Server without permission errors.
+- Verified Hardware Triggering: Initiating sequence from Control GUI triggered
+  the EPICS state transition to `ACQUIRING`, immediately followed by 
+  `[EPICS AUTO-TRIGGER] Sent *TRG command!` in the DG645 activity log.
+- Physical pulse output verified on oscilloscope / downstream hardware.
+================================================================================
