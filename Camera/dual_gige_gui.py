@@ -621,7 +621,7 @@ class SingleGigECameraGUI(QMainWindow):
                 QMessageBox.warning(self, "Single Shot", "Failed to grab single frame from Camera 0.")
         except Exception as e:
             QMessageBox.critical(self, "Single Shot Error", str(e))
-            
+
     def _on_local_trigger_changed(self, idx: int):
         mode = "EXTERNAL_TTL" if idx == 1 else "INTERNAL/OFF"
         self.controller.set_trigger_mode(mode)
@@ -761,7 +761,7 @@ class SingleGigECameraGUI(QMainWindow):
     def _handle_epics_auto_sequence(self, new_state: str):
         self.pv_state_label.setText(new_state)
 
-        # Update PV readouts
+        # 1. 即時讀取最新 PV 數據
         try:
             import epics
             fn = epics.caget("EXP:Seq:FileName", default="exp_run")
@@ -771,22 +771,26 @@ class SingleGigECameraGUI(QMainWindow):
         except Exception:
             fn, sn = "exp_run", 0
 
-        # Edge detection safeguard
+        # 防重複執行 (Edge detection)
         if new_state == self._last_epics_state:
             return
 
         self.log_daq(f"Sequence State Transition: {self._last_epics_state} -> {new_state}")
 
+        # 2. 狀態機自動化邏輯
         if new_state == "ARMED":
-            self.log_daq("[ARMED] Pre-allocating image memory buffers...")
+            # 進入 ARMED 時，提前喚醒相機 SDK 與預分配 Buffer
+            self.controller.set_trigger_mode("EXTERNAL_TTL")
+            self.controller.start_capture_all()
+            self.log_daq("⚡ [ARMED] Locked to EXTERNAL_TTL & Started camera SDK capture buffer.")
 
         elif new_state == "ACQUIRING":
-            # Force External TTL Trigger
-            self.controller.set_trigger_mode("EXTERNAL_TTL")
-            self.log_daq("[ACQUIRING] Locked camera to EXTERNAL_TTL mode. Waiting for DG645 pulse...")
+            # 確保相機在等待 DG645 TTL 脈衝時保持在 capture 狀態
+            self.controller.start_capture_all()
+            self.log_daq("⚡ [ACQUIRING] Ready and waiting for DG645 TTL pulse...")
 
         elif new_state == "SAVING":
-            # Auto-Save using EPICS PV metadata
+            # 3. 背景自動存檔邏輯
             try:
                 target_dir = self.daq_dir_edit.text().strip()
                 os.makedirs(target_dir, exist_ok=True)
@@ -796,9 +800,9 @@ class SingleGigECameraGUI(QMainWindow):
 
                 if self.latest_frame is not None:
                     tifffile.imwrite(filepath, self.latest_frame)
-                    self.log_daq(f"⚡ [SAVING AUTO-SAVE] Successfully saved frame to: {filepath}")
+                    self.log_daq(f"💾 [SAVING COMPLETE] Successfully saved frame to: {filepath}")
                 else:
-                    self.log_daq("❌ [SAVING ERROR] No image frame in buffer to save!")
+                    self.log_daq("❌ [SAVING ERROR] No image frame in buffer! Check trigger pulse.")
             except Exception as e:
                 self.log_daq(f"❌ [SAVING ERROR] Failed auto-saving camera image: {e}")
 
