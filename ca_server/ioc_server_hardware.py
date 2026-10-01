@@ -61,39 +61,39 @@ class HardwareDAQPVGroup(PVGroup):
         doc='System error message'
     )
 
-    # 7. EXP:Seq:DG645Status (str, RO)
+    # 7. EXP:Seq:DG645Status (str, RW) -- 已修改為允許 GUI 寫入
     dg645_status = pvproperty(
         name='EXP:Seq:DG645Status',
         value='CONNECTED',
         dtype=ChannelType.STRING,
-        read_only=True,
+        read_only=False,
         doc='DG645 connection status: CONNECTED / DISCONNECTED'
     )
 
-    # 8. EXP:Seq:DG645Mode (str, RO)
+    # 8. EXP:Seq:DG645Mode (str, RW) -- 已修改為允許 GUI 寫入
     dg645_mode = pvproperty(
         name='EXP:Seq:DG645Mode',
         value='SIMULATED',
         dtype=ChannelType.STRING,
-        read_only=True,
+        read_only=False,
         doc='DG645 operation mode: REAL / SIMULATED'
     )
 
-    # 9. EXP:Seq:CameraStatus (str, RO)
+    # 9. EXP:Seq:CameraStatus (str, RW) -- 已修改為允許 GUI 寫入
     camera_status = pvproperty(
         name='EXP:Seq:CameraStatus',
         value='CONNECTED',
         dtype=ChannelType.STRING,
-        read_only=True,
+        read_only=False,
         doc='Camera connection status: CONNECTED / DISCONNECTED'
     )
 
-    # 10. EXP:Seq:CameraMode (str, RO)
+    # 10. EXP:Seq:CameraMode (str, RW) -- 已修改為允許 GUI 寫入
     camera_mode = pvproperty(
         name='EXP:Seq:CameraMode',
         value='SIMULATED',
         dtype=ChannelType.STRING,
-        read_only=True,
+        read_only=False,
         doc='Camera operation mode: REAL / SIMULATED'
     )
 

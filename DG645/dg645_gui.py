@@ -305,6 +305,15 @@ class DG645App(tk.Tk):
             self.status_var.set("Disconnected")
             self.status_label.config(foreground="black")
             self.log("Disconnected from serial port.")
+
+            # 【新增】斷開串口時，將 EPICS PV 切回 SIMULATED / DISCONNECTED
+            try:
+                import epics
+                epics.caput("EXP:Seq:DG645Mode", "SIMULATED")
+                epics.caput("EXP:Seq:DG645Status", "DISCONNECTED")
+            except Exception as e:
+                self.log(f"Failed to update EPICS PV: {e}", "WARNING")
+
         else:
             # Connect
             port = self.port_var.get().strip()
@@ -320,6 +329,16 @@ class DG645App(tk.Tk):
 
                 # Auto-query current mode
                 self._read_current_delays()
+
+                # 【新增】實體 COM 埠連線成功後，通知 EPICS IOC 切換為 REAL 與 CONNECTED
+                try:
+                    import epics
+                    epics.caput("EXP:Seq:DG645Mode", "REAL")
+                    epics.caput("EXP:Seq:DG645Status", "CONNECTED")
+                    self.log("Updated EPICS PV -> Mode: REAL | Status: CONNECTED")
+                except Exception as e:
+                    self.log(f"Failed to update EPICS PV: {e}", "WARNING")
+
             except Exception as e:
                 self.dg = None
                 self.log(f"Failed to connect: {e}", "ERROR")
