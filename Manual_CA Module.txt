@@ -1,0 +1,111 @@
+## Testing Guide for Refactored PC1/PC2 Codes
+
+The repository now contains three key Python modules that have been refactored to use **PyEpics** and an improved OOP design:
+
+1. `gui/pc1_control_gui.py` – Control GUI (client side) handling user commands and logging.
+2. `gui/pc2_status_gui.py` – Status GUI (server side) displaying camera status, shot number, file name and an event log.
+3. `ca_server/ioc_server_pc2.py` – IOC implementation that increments the shot number and manages the PVs.
+
+### 1. How to Test the Three Codes
+
+#### Prerequisites
+- Activate the virtual environment:
+  ```powershell
+  .\.venv\Scripts\activate
+  ```
+- Ensure EPICS base libraries are installed on Windows (required by **PyEpics**). You can download the pre‑compiled binaries from the EPICS website.
+- The two PCs (or two terminal windows) must be reachable on the network. Know the IP address of the PC that runs the IOC (PC‑2).
+
+#### Step‑by‑Step Test Procedure
+1. **Start the IOC (PC‑2)**
+   ```powershell
+   python -m ca_server.ioc_server_pc2
+   ```
+   The server creates the EPICS PVs:
+   - `EXP:Seq:CameraStatus`
+   - `EXP:Seq:ShotNumber`
+   - `EXP:Seq:FileName`
+   - `EXP:Seq:Arm`
+   You should see log messages confirming the PVs are initialised.
+2. **Launch the Status GUI (PC‑2)**
+   ```powershell
+   python -m gui.pc2_status_gui
+   ```
+   The GUI connects to the IOC, subscribes to the four PVs and displays real‑time updates. An **Event Log** area (bottom‑right) shows connection events, PV changes and any errors.
+3. **Launch the Control GUI (PC‑1)**
+   ```powershell
+   python -m gui.pc1_control_gui
+   ```
+   Enter the IP address of the PC‑2 IOC in the *Apply IP* field and press **Apply IP**. The environment variable `EPICS_CA_ADDR_LIST` is set and `epics.ca.initialize_libca()` is called automatically.
+   The UI now shows the current `CameraStatus`, `ShotNumber` and `FileName`. These values are fetched via `caget` on start‑up.
+4. **Execute a single shot**
+   - Click **Arm** then **Fire** on the control GUI.
+   - Observe the following sequence in the Status GUI log:
+     - "Arm command issued"
+     - "CameraStatus -> ACTIVATING"
+     - "Single‑shot Fire issued! (FileName: …)"
+   - Verify that `ShotNumber` increments by one in both GUIs.
+5. **Validate error handling**
+   - Disconnect the network cable or stop the IOC process.
+   - Both GUIs should emit clear error messages (e.g., *Failed to connect* or *PV not found*) without crashing.
+   - Re‑connect and re‑apply the IP – the GUIs recover automatically.
+
+#### Automated Test (Optional)
+You can script the above steps using `unittest` or `pytest` together with `subprocess`:
+```python
+import subprocess, time, os
+
+def test_full_flow():
+    ioc = subprocess.Popen(["python", "-m", "ca_server.ioc_server_pc2"]) 
+    time.sleep(2)  # give IOC time to start
+    pc2 = subprocess.Popen(["python", "-m", "gui.pc2_status_gui"]) 
+    pc1 = subprocess.Popen(["python", "-m", "gui.pc1_control_gui"]) 
+    # ... send commands via EPICS or GUI automation ...
+    # assert shot number increased, log contains expected strings
+    for p in (pc1, pc2, ioc):
+        p.terminate()
+```
+
+### 2. Merging into Other Programs – Using the OOP Design
+
+Both GUIs are built around **Qt‑based worker objects** (`ControlWorker` and `StatusWorker`) that run an ``asyncio`` event loop in a separate ``QThread``. They expose a clean **signal‑driven API**:
+- `cameraStatusChanged(str)`
+- `shotNumberChanged(int)`
+- `fileNameChanged(str)`
+- `logMessage(str)` (PC‑2 only)
+- `operationFinished(str)` (PC‑1 only)
+
+#### Re‑using the Workers
+1. **Import the worker classes** in any Qt application:
+   ```python
+   from gui.pc1_control_gui import ControlWorker
+   from gui.pc2_status_gui import StatusWorker
+   ```
+2. **Instantiate the worker in a ``QThread``** (same pattern as the original GUIs):
+   ```python
+   thread = QThread()
+   worker = ControlWorker()
+   worker.moveToThread(thread)
+   thread.started.connect(worker.run)
+   thread.start()
+   ```
+3. **Connect to the signals** you need – you can choose a subset, e.g. only `shotNumberChanged` if you only care about the counter.
+4. **Trigger actions** by invoking the public slots (`arm`, `fire`, `stop`, etc.) from your own UI components.
+5. **Environment handling** – The workers automatically initialise the EPICS library when the IP address is set. If you embed them in a larger application, simply set the address before starting the thread:
+   ```python
+   os.environ["EPICS_CA_ADDR_LIST"] = "<IP>"
+   epics.ca.initialize_libca()
+   ```
+
+#### Extending the OOP Layer
+- **Custom PVs**: Subclass `ControlWorker` or `StatusWorker` and add new EPICS PV names as class attributes. Override ``run`` to register additional ``camonitor`` callbacks.
+- **Shared Logging**: Both workers emit a ``logMessage``‑style signal. A host application can collect these into a central log file by connecting all workers to the same slot.
+- **Dependency Injection**: If you need a different EPICS backend (e.g., a simulation library), inject a ``pv_accessor`` object that implements ``caget``, ``caput`` and ``camonitor``. Replace the direct ``epics`` calls in the worker with calls to this accessor.
+
+#### Benefits of the Current Design
+- **Thread‑safe**: All EPICS network activity lives in a dedicated thread, keeping the UI responsive.
+- **Signal‑driven**: UI updates are decoupled from the communication layer – you can plug the workers into any Qt widget hierarchy.
+- **Modular**: The workers are pure Python classes with no hard‑coded GUI references; they can be reused in console scripts, other GUIs, or automated test suites.
+
+---
+*This document has been saved to `code_refactoring_record.txt` for quick reference.*

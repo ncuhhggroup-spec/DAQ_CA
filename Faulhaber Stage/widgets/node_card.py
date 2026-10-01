@@ -8,7 +8,7 @@ homing, absolute positioning, and jog controls.
 from PyQt6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QDoubleSpinBox,
-    QFrame, QWidget
+    QLineEdit, QFrame, QWidget
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QFont
@@ -46,22 +46,46 @@ class NodeCardWidget(QGroupBox):
     """
     # Signal emitted when a command needs to be sent: (node_id, cmd_string)
     sig_send_command = pyqtSignal(int, str)
+    # Signal emitted when the axis label changes: (node_id, new_label)
+    sig_label_changed = pyqtSignal(int, str)
 
-    def __init__(self, node_id: int, title: str = "", parent=None):
-        super().__init__(f" Node {node_id}: {title or f'Axis {node_id}'} ", parent)
+    def __init__(self, node_id: int, title: str = "", parent=None, label: str = ""):
+        super().__init__(f" Node {node_id} ", parent)
         self.node_id = node_id
+        # Store label text; default to provided title or generic Axis label
+        self._axis_label = label if label else title if title else f"Axis {node_id}"
         self.current_mode = StageMode.LINEAR
         self.last_counts = 0
         self.is_enabled = False
 
+
+
+
         self._init_ui()
         self._update_unit_labels()
+        # Set initial label text in the line edit after UI is built
+        self.label_edit.setText(self._axis_label)
 
     def _init_ui(self):
         self.setObjectName(f"nodeCard_{self.node_id}")
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         layout.setContentsMargins(12, 16, 12, 14)
+
+        # -------------------------------------------------------------
+        # Axis Label Edit
+        # -------------------------------------------------------------
+        label_layout = QHBoxLayout()
+        label_lbl = QLabel("Label:")
+        label_lbl.setStyleSheet("font-weight: bold; color: #94A3B8;")
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("Enter axis label")
+        self.label_edit.setFixedHeight(26)
+        self.label_edit.textChanged.connect(self._on_label_changed)
+        label_layout.addWidget(label_lbl)
+        label_layout.addWidget(self.label_edit)
+        layout.addLayout(label_layout)
+
 
         # -------------------------------------------------------------
         # 1. Calibration Mode Selector
@@ -235,6 +259,20 @@ class NodeCardWidget(QGroupBox):
         layout.addWidget(jog_group)
         layout.addStretch()
 
+    def _on_label_changed(self, text):
+        # Emit signal to inform MainWindow of label change
+        self.sig_label_changed.emit(self.node_id, text)
+
+    def set_label(self, text: str):
+        self._axis_label = text
+        self.label_edit.blockSignals(True)
+        self.label_edit.setText(text)
+        self.label_edit.blockSignals(False)
+
+    def get_label(self) -> str:
+        """Return the current axis label."""
+        return self._axis_label
+
     def _on_mode_changed(self):
         self.current_mode = self.combo_mode.currentData()
         self._update_unit_labels()
@@ -298,6 +336,8 @@ class NodeCardWidget(QGroupBox):
         phys_val = UnitConverter.counts_to_physical(counts, self.current_mode)
         self.lbl_phys_pos.setText(UnitConverter.format_physical(phys_val, self.current_mode))
         self.lbl_raw_counts.setText(f"{counts:+d} cts")
+        # Keep label edit in sync (optional, if needed)
+        # self.label_edit.setText(self._axis_label)
 
     def update_power_state(self, is_enabled: bool):
         self.is_enabled = is_enabled
@@ -308,3 +348,5 @@ class NodeCardWidget(QGroupBox):
         else:
             self.lbl_power_status.setText("DISABLED")
             self.lbl_power_status.setStyleSheet("font-weight: bold; color: #EF4444; font-size: 11px;")
+        # Update label edit style based on enabled state (optional)
+        # self.label_edit.setEnabled(is_enabled)
