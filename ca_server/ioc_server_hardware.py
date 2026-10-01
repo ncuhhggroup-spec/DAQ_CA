@@ -1,9 +1,3 @@
-#import asyncio
-#import logging
-#from caproto.asyncio.server import PVGroup, pvproperty, run
-#from caproto.server import PVGroup, pvproperty, run
-#from caproto import ChannelType
-
 import asyncio
 import logging
 from caproto.server import PVGroup, pvproperty, run
@@ -13,8 +7,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 class HardwareDAQPVGroup(PVGroup):
     """
-    8-PV EPICS IOC for DG645 + Camera Hardware Integration Test System
-    Spec: ARCHITECTURE_TEST_SYSTEM.md
+    10-PV EPICS IOC for DG645 + Camera Hardware Integration Test System
+    Exposes Hardware Connection Status and Hardware Mode (REAL vs SIMULATED).
     """
 
     # 1. EXP:Seq:ShotTarget (int, RW)
@@ -73,22 +67,39 @@ class HardwareDAQPVGroup(PVGroup):
         value='CONNECTED',
         dtype=ChannelType.STRING,
         read_only=True,
-        doc='DG645 hardware connection status: CONNECTED / DISCONNECTED'
+        doc='DG645 connection status: CONNECTED / DISCONNECTED'
     )
 
-    # 8. EXP:Seq:CameraStatus (str, RO)
+    # 8. EXP:Seq:DG645Mode (str, RO)
+    dg645_mode = pvproperty(
+        name='EXP:Seq:DG645Mode',
+        value='SIMULATED',
+        dtype=ChannelType.STRING,
+        read_only=True,
+        doc='DG645 operation mode: REAL / SIMULATED'
+    )
+
+    # 9. EXP:Seq:CameraStatus (str, RO)
     camera_status = pvproperty(
         name='EXP:Seq:CameraStatus',
         value='CONNECTED',
         dtype=ChannelType.STRING,
         read_only=True,
-        doc='Camera hardware connection status: CONNECTED / DISCONNECTED'
+        doc='Camera connection status: CONNECTED / DISCONNECTED'
+    )
+
+    # 10. EXP:Seq:CameraMode (str, RO)
+    camera_mode = pvproperty(
+        name='EXP:Seq:CameraMode',
+        value='SIMULATED',
+        dtype=ChannelType.STRING,
+        read_only=True,
+        doc='Camera operation mode: REAL / SIMULATED'
     )
 
     @arm.putter
     async def arm(self, instance, value):
         if value == 1:
-            # Check current state and hardware status interlocks
             cur_state = self.state.value
             dg_stat = self.dg645_status.value
             cam_stat = self.camera_status.value
@@ -107,7 +118,6 @@ class HardwareDAQPVGroup(PVGroup):
                 await self.state.write("ERROR")
                 return 0
 
-            # Trigger non-blocking acquisition sequence task
             asyncio.create_task(self._run_sequence())
         return value
 
@@ -123,7 +133,9 @@ class HardwareDAQPVGroup(PVGroup):
 
             # STAGE 2: ACQUIRING
             await self.state.write("ACQUIRING")
-            logging.info("[ACQUIRING] Sending DG645 pulse trigger & acquiring frame...")
+            dg_mode = self.dg645_mode.value
+            cam_mode = self.camera_mode.value
+            logging.info(f"[ACQUIRING] Pulse trigger & acquiring frame (DG645: {dg_mode}, Camera: {cam_mode})...")
             await asyncio.sleep(1.0)
 
             # STAGE 3: SAVING
@@ -144,11 +156,9 @@ class HardwareDAQPVGroup(PVGroup):
             await self.state.write("ERROR")
 
         finally:
-            # Self-reset ARM PV to 0
             await self.arm.write(0)
 
 if __name__ == '__main__':
-    logging.info("Starting EPICS Hardware IOC Server with 8 PV Spec...")
-    # 傳入 prefix='' 避免 TypeError
+    logging.info("Starting EPICS Hardware IOC Server with Mode Indicators...")
     pvdb = HardwareDAQPVGroup(prefix='')
     run(pvdb.pvdb)

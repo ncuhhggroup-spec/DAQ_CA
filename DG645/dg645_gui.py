@@ -45,6 +45,24 @@ class DG645App(tk.Tk):
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # ---------------------------------------------------------------------
+        # 0. EPICS IOC Network & Mode Status Banner
+        # ---------------------------------------------------------------------
+        epics_frame = ttk.LabelFrame(main_frame, text=" EPICS IOC Network Status ", padding="8")
+        epics_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.epics_ioc_label = tk.Label(
+            epics_frame,
+            text="EPICS IOC: DISCONNECTED | Mode: UNKNOWN",
+            font=("Segoe UI", 10, "bold"),
+            bg="#f44336",
+            fg="white",
+            padx=10,
+            pady=4
+        )
+        self.epics_ioc_label.pack(fill=tk.X)
+        self._check_epics_ioc_status()
+
+        # ---------------------------------------------------------------------
         # 1. Connection Panel
         # ---------------------------------------------------------------------
         conn_frame = ttk.LabelFrame(main_frame, text=" Serial Connection ", padding="10")
@@ -440,6 +458,35 @@ class DG645App(tk.Tk):
         except Exception as e:
             self.log(f"Error sending trigger: {e}", "ERROR")
             messagebox.showerror("Trigger Error", f"Failed to send trigger command:\n{e}")
+
+    def _check_epics_ioc_status(self):
+        """Poll EPICS PVs to report IOC network status and hardware mode."""
+        try:
+            import epics
+            stat = epics.caget("EXP:Seq:DG645Status", timeout=0.3)
+            mode = epics.caget("EXP:Seq:DG645Mode", timeout=0.3)
+
+            if stat is not None and mode is not None:
+                if mode == "REAL":
+                    bg_color = "#2e7d32"
+                else:
+                    bg_color = "#e65100"
+                self.epics_ioc_label.config(
+                    text=f"✔ EPICS IOC: ONLINE | Status: {stat} | Mode: {mode} HARDWARE",
+                    bg=bg_color
+                )
+            else:
+                self.epics_ioc_label.config(
+                    text="❌ EPICS IOC: DISCONNECTED",
+                    bg="#f44336"
+                )
+        except Exception:
+            self.epics_ioc_label.config(
+                text="❌ EPICS IOC: DISCONNECTED",
+                bg="#f44336"
+            )
+        # Re-poll every 2 seconds
+        self.after(2000, self._check_epics_ioc_status)
 
 
 def main():
