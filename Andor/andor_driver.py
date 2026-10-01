@@ -6,9 +6,6 @@ Low-level Python ctypes wrapper for the Andor SDK 2.x C-API.
 Supports:
   - Real hardware via atmcd64d.dll / atmcd32d.dll
   - Simulation / mock fallback mode when the DLL or camera is not present
-
-Author : <your-name>
-Date   : 2026-09-21
 """
 
 from __future__ import annotations
@@ -95,16 +92,7 @@ def _code_to_str(code: int) -> str:
     return DRV_ERROR_CODES.get(code, f"UNKNOWN_CODE_{code}")
 
 
-# ---------------------------------------------------------------------------
-# Mock / Simulation DLL shim
-# ---------------------------------------------------------------------------
-
 class _MockDLL:
-    """
-    Minimal simulation shim that mirrors every Andor SDK function we use.
-    Returns DRV_SUCCESS for most calls and generates synthetic CCD frames.
-    """
-
     def __init__(self) -> None:
         self._width  = 1024
         self._height = 1024
@@ -161,7 +149,6 @@ class _MockDLL:
         return self._ok()
 
     def GetAcquiredData16(self, buf_ptr, size: ctypes.c_ulong) -> ctypes.c_uint32:
-        """Fill buffer with a synthetic Gaussian spot + Poisson noise."""
         n = size.value
         w = self._width
         h = self._height
@@ -178,12 +165,7 @@ class _MockDLL:
         return self._ok()
 
 
-# ---------------------------------------------------------------------------
-# Real DLL loader
-# ---------------------------------------------------------------------------
-
 def _load_real_dll(sdk_dir: str) -> ctypes.CDLL:
-    """Attempt to load the Andor DLL from sdk_dir."""
     arch = platform.architecture()[0]
     dll_name = "atmcd64d.dll" if arch == "64bit" else "atmcd32d.dll"
     dll_path = os.path.join(sdk_dir, dll_name)
@@ -194,25 +176,7 @@ def _load_real_dll(sdk_dir: str) -> ctypes.CDLL:
     return dll
 
 
-# ---------------------------------------------------------------------------
-# Main driver class
-# ---------------------------------------------------------------------------
-
 class AndorCameraDriver:
-    """
-    High-level Pythonic wrapper around the Andor SDK 2.x C-API.
-
-    Parameters
-    ----------
-    sdk_dir : str
-        Path to the Andor SDK installation folder.
-        Default: ``C:\\Program Files\\Andor SDK``
-    simulation : bool | None
-        - ``True``  – always use the mock DLL (no hardware needed).
-        - ``False`` – always try real hardware (raises on failure).
-        - ``None``  – auto-detect: fall back to simulation if DLL/camera absent.
-    """
-
     SDK_DIR_DEFAULT = r"C:\Program Files\Andor SDK"
 
     def __init__(
@@ -226,11 +190,10 @@ class AndorCameraDriver:
         self._initialized = False
         self._simulated   = False
         self._dll: object = None
+        self._last_exposure_s: float = 0.1
+        self._last_trigger_mode: int = 0
+        self._last_trigger_name: str = "INTERNAL/OFF"
         self._setup_dll(simulation)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _setup_dll(self, simulation: Optional[bool]) -> None:
         if simulation is True:
@@ -247,35 +210,25 @@ class AndorCameraDriver:
                 raise RuntimeError(
                     f"Real hardware required but DLL could not be loaded: {exc}"
                 ) from exc
-            logger.warning(
-                "Andor DLL not found (%s). Falling back to simulation.", exc
-            )
+            logger.warning("Andor DLL not found (%s). Falling back to simulation.", exc)
             self._dll = _MockDLL()
             self._simulated = True
 
     def _check(self, code: int, fn_name: str = "") -> None:
-        """Raise RuntimeError if code != DRV_SUCCESS."""
         if code != DRV_SUCCESS:
             msg = f"Andor SDK error in {fn_name}: {_code_to_str(code)} (code={code})"
             logger.error(msg)
             raise RuntimeError(msg)
 
     def _call(self, fn_name: str, *args) -> int:
-        """Invoke a function on the real DLL and return the error code."""
         fn = getattr(self._dll, fn_name)
         result = fn(*args)
         return result.value if isinstance(result, ctypes.c_uint32) else int(result)
 
     def _sim_call(self, fn_name: str, *args) -> None:
-        """Invoke a function on the mock DLL (ignores return value)."""
         getattr(self._dll, fn_name)(*args)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def initialize(self) -> None:
-        """Initialize the camera and read detector dimensions."""
         if self._initialized:
             return
 
@@ -299,7 +252,6 @@ class AndorCameraDriver:
         self._initialized = True
 
     def shutdown(self) -> None:
-        """Shut down the camera."""
         if not self._initialized:
             return
         if self._simulated:
@@ -310,8 +262,8 @@ class AndorCameraDriver:
         logger.info("Camera shut down.")
 
     def set_exposure_time(self, exposure_s: float) -> None:
-        """Set exposure time in seconds."""
         self._require_init()
+        self._last_exposure_s = exposure_s
         arg = ctypes.c_float(exposure_s)
         if self._simulated:
             self._sim_call("SetExposureTime", arg)
@@ -320,17 +272,41 @@ class AndorCameraDriver:
         logger.debug("Exposure time: %.4f s", exposure_s)
 
     def set_trigger_mode(self, mode: int) -> None:
-        """
-        Set trigger mode.
-        0=Internal, 1=External TTL, 6=External Start, 7=Bulb, 10=Software.
-        """
         self._require_init()
+        self._last_trigger_mode = mode
+        self._last_trigger_name = "EXTERNAL_TTL" if mode == 1 else "INTERNAL/OFF"
         arg = ctypes.c_int(mode)
         if self._simulated:
             self._sim_call("SetTriggerMode", arg)
         else:
             self._check(self._call("SetTriggerMode", arg), "SetTriggerMode")
-        logger.debug("Trigger mode: %d", mode)
+        logger.debug("Trigger mode: %d (%s)", mode, self._last_trigger_name)
+
+    def set_trigger_mode_by_name(self, mode_str: str) -> None:
+        mode_idx = 1 if mode_str.upper() == "EXTERNAL_TTL" else 0
+        self.set_trigger_mode(mode_idx)
+
+    def get_camera_status_info(self) -> dict:
+        if not self._initialized:
+            return {
+                "exposure_ms": 0.0,
+                "trigger_mode": "N/A",
+                "detector_size": "0 x 0",
+                "status_str": "UNINITIALIZED",
+                "mode": "UNKNOWN",
+            }
+
+        st_code = self.get_status()
+        st_str = _code_to_str(st_code)
+        mode_str = "SIMULATED" if self._simulated else "REAL"
+
+        return {
+            "exposure_ms": self._last_exposure_s * 1000.0,
+            "trigger_mode": self._last_trigger_name,
+            "detector_size": f"{self.width} x {self.height} px",
+            "status_str": st_str,
+            "mode": mode_str,
+        }
 
     def set_acquisition_params(
         self,
@@ -338,15 +314,6 @@ class AndorCameraDriver:
         acq_mode: int = 1,
         read_mode: int = 4,
     ) -> None:
-        """
-        Configure readout mode, acquisition mode, frame count, and image area.
-
-        Parameters
-        ----------
-        num_frames : int   Number of frames (Kinetic Series length).
-        acq_mode   : int   1=Single Scan, 3=Kinetic Series.
-        read_mode  : int   4=Image (full 2-D frame).
-        """
         self._require_init()
 
         steps = [
@@ -370,22 +337,14 @@ class AndorCameraDriver:
         else:
             self._check(self._call("SetImage", *img_args), "SetImage")
 
-        logger.debug(
-            "Acq params: mode=%d read=%d frames=%d size=%dx%d",
-            acq_mode, read_mode, num_frames, self.width, self.height,
-        )
-
     def start_acquisition(self) -> None:
-        """Start acquisition sequence."""
         self._require_init()
         if self._simulated:
             self._sim_call("StartAcquisition")
         else:
             self._check(self._call("StartAcquisition"), "StartAcquisition")
-        logger.info("Acquisition started.")
 
     def abort_acquisition(self) -> None:
-        """Abort any ongoing acquisition (safe to call even when idle)."""
         if not self._initialized:
             return
         if self._simulated:
@@ -395,10 +354,8 @@ class AndorCameraDriver:
                 self._call("AbortAcquisition")
             except RuntimeError:
                 pass
-        logger.info("Acquisition aborted.")
 
     def wait_for_acquisition(self) -> None:
-        """Block until the camera signals acquisition complete."""
         self._require_init()
         if self._simulated:
             self._sim_call("WaitForAcquisition")
@@ -406,7 +363,6 @@ class AndorCameraDriver:
             self._check(self._call("WaitForAcquisition"), "WaitForAcquisition")
 
     def get_status(self) -> int:
-        """Return current camera status code (DRV_IDLE, DRV_ACQUIRING, …)."""
         if not self._initialized:
             return DRV_IDLE
         c_status = ctypes.c_int(DRV_IDLE)
@@ -419,9 +375,6 @@ class AndorCameraDriver:
         return c_status.value
 
     def get_acquired_data16(self) -> np.ndarray:
-        """
-        Retrieve the last acquired frame as a 2-D uint16 NumPy array (H x W).
-        """
         self._require_init()
         n_pixels = self.width * self.height
         buf  = (ctypes.c_uint16 * n_pixels)()
@@ -437,26 +390,17 @@ class AndorCameraDriver:
         frame = np.frombuffer(buf, dtype=np.uint16).reshape(self.height, self.width)
         return frame.copy()
 
-    # ------------------------------------------------------------------
-    # Convenience: single-frame acquisition end-to-end
-    # ------------------------------------------------------------------
-
     def acquire_single_frame(
         self,
         exposure_s: float = 0.1,
         trigger_mode: int = 0,
     ) -> np.ndarray:
-        """Configure, acquire, and return one frame (shape: H x W, uint16)."""
         self.set_exposure_time(exposure_s)
         self.set_trigger_mode(trigger_mode)
         self.set_acquisition_params(num_frames=1, acq_mode=1)
         self.start_acquisition()
         self.wait_for_acquisition()
         return self.get_acquired_data16()
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
 
     @property
     def is_initialized(self) -> bool:
@@ -468,20 +412,11 @@ class AndorCameraDriver:
 
     @property
     def detector_size(self) -> Tuple[int, int]:
-        """(width, height) in pixels."""
         return self.width, self.height
-
-    # ------------------------------------------------------------------
-    # Private guards
-    # ------------------------------------------------------------------
 
     def _require_init(self) -> None:
         if not self._initialized:
             raise RuntimeError("Camera not initialized. Call initialize() first.")
-
-    # ------------------------------------------------------------------
-    # Context manager
-    # ------------------------------------------------------------------
 
     def __enter__(self) -> "AndorCameraDriver":
         self.initialize()
@@ -489,25 +424,3 @@ class AndorCameraDriver:
 
     def __exit__(self, *_) -> None:
         self.shutdown()
-
-    def __repr__(self) -> str:
-        return (
-            f"<AndorCameraDriver "
-            f"sim={self._simulated} "
-            f"init={self._initialized} "
-            f"size={self.width}x{self.height}>"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Quick self-test (run directly)
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-    with AndorCameraDriver() as cam:
-        print(cam)
-        frame = cam.acquire_single_frame(exposure_s=0.05)
-        print(f"Frame shape : {frame.shape}")
-        print(f"Frame dtype : {frame.dtype}")
-        print(f"Frame min/max: {frame.min()} / {frame.max()}")

@@ -1,40 +1,7 @@
 """
 andor_gui.py
 ------------
-PyQt6 / PySide6 GUI for the Andor CCD camera driver.
-
-Features
---------
-* Live 2-D image display via pyqtgraph ImageView with selectable colormaps
-* Tabbed display:
-    - Tab 1: "Raw Image" (pixel coordinates)
-    - Tab 2: "Wavelength Calibrated" (CDS calibrated x-axis in nm, background-subtracted)
-* CDS wavelength calibration from grating diffraction parameters:
-    - d_gt = 278 nm, m_diff = 1, gamma_toroi = 3.75 deg, R = 1926 mm,
-      px = 13.5e-3 mm, x0 = 963 px, theta_0 adjustable
-* Stateful rolling background subtraction acquisition loop:
-    - a. Acquire initial background B_0
-    - b. Await hardware/software trigger for new shot
-    - c. Acquire raw data D_k, compute S_k = D_k - B_{k-1}, display S_k
-    - d. Immediately acquire new background B_k for next shot (k+1)
-* Single-shot acquisition mode
-* TIFF data & metadata persistence (D_k, B_k, S_k) with JSON-formatted ImageDescription
-* Output directory destination UI with "Browse..." button
-* "My Note" custom note text entry field attached to metadata
-* Local JSON state persistence (andor_settings.json) on shutdown and restore on startup
-* Thread-isolated background workers (QThread) to ensure non-blocking UI
-* Simulation / real hardware toggle
-* Status bar with camera mode indicator & frame/shot statistics
-
-Dependencies
-------------
-    pip install PyQt6 pyqtgraph numpy tifffile
-    -- OR --
-    pip install PySide6 pyqtgraph numpy tifffile
-
-Usage
------
-    python andor_gui.py
+PyQt6 / PySide6 GUI for the Andor CCD camera driver integrated with EPICS DAQ.
 """
 
 from __future__ import annotations
@@ -42,6 +9,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import pathlib
 import sys
 import time
@@ -49,9 +17,6 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Qt shim – try PyQt6 first, then PySide6
-# ---------------------------------------------------------------------------
 try:
     from PyQt6 import QtCore, QtGui, QtWidgets
     from PyQt6.QtCore import (
@@ -61,7 +26,7 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QGroupBox, QLabel, QDoubleSpinBox, QSpinBox, QComboBox, QPushButton,
         QStatusBar, QSizePolicy, QFrame, QSplitter, QMessageBox,
-        QLineEdit, QTabWidget, QFileDialog, QScrollArea,
+        QLineEdit, QTabWidget, QFileDialog, QScrollArea, QTextEdit, QFormLayout,
     )
     from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QTransform
     _QT_BACKEND = "PyQt6"
@@ -74,7 +39,7 @@ except ImportError:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QGroupBox, QLabel, QDoubleSpinBox, QSpinBox, QComboBox, QPushButton,
         QStatusBar, QSizePolicy, QFrame, QSplitter, QMessageBox,
-        QLineEdit, QTabWidget, QFileDialog, QScrollArea,
+        QLineEdit, QTabWidget, QFileDialog, QScrollArea, QTextEdit, QFormLayout,
     )
     from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QTransform
     _QT_BACKEND = "PySide6"
@@ -91,24 +56,15 @@ from andor_driver import AndorCameraDriver, DRV_IDLE, DRV_ACQUIRING
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# CDS Grating / Spectrometer Constants
-# Mirrors CalculateEnergy_260415.m line 6:
-# d_gt = 278; m_diff = 1; gamma_toroi = 3.75; R = 1926; px = 13.5e-3; x0 = 963;
-# ---------------------------------------------------------------------------
-D_GT_NM         = 278.0        # grating period in nm
-M_DIFF          = 1            # diffraction order
-GAMMA_TOROI_DEG = 3.75         # toroidal angle in degrees
-R_MM            = 1926.0       # spectrometer radius in mm
-PX_MM           = 13.5e-3      # pixel size in mm
-X0_PX           = 963.0        # center pixel (1-indexed)
+D_GT_NM         = 278.0
+M_DIFF          = 1
+GAMMA_TOROI_DEG = 3.75
+R_MM            = 1926.0
+PX_MM           = 13.5e-3
+X0_PX           = 963.0
 
-# Path to local state file
 _SETTINGS_PATH = pathlib.Path(__file__).parent / "andor_settings.json"
 
-# ---------------------------------------------------------------------------
-# Color palette constants
-# ---------------------------------------------------------------------------
 BG_DARK        = "#0d0f14"
 BG_PANEL       = "#13161f"
 BG_CARD        = "#1a1d28"
@@ -131,7 +87,6 @@ QPushButton {{
     padding: 8px 16px;
     font-size: 13px;
     font-weight: 600;
-    letter-spacing: 0.3px;
 }}
 QPushButton:hover {{ background-color: #60a5fa; }}
 QPushButton:pressed {{ background-color: #2563eb; }}
@@ -191,19 +146,8 @@ QDoubleSpinBox, QSpinBox {{
     border-radius: 6px;
     padding: 5px 8px;
     font-size: 13px;
-    selection-background-color: {ACCENT_BLUE};
 }}
 QDoubleSpinBox:focus, QSpinBox:focus {{ border-color: {ACCENT_BLUE}; }}
-QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
-QSpinBox::up-button, QSpinBox::down-button {{
-    width: 20px;
-    background-color: {BG_CARD};
-    border-left: 1px solid {BORDER};
-}}
-QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover,
-QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
-    background-color: {ACCENT_BLUE};
-}}
 """
 
 COMBO_STYLE = f"""
@@ -217,13 +161,6 @@ QComboBox {{
     min-width: 150px;
 }}
 QComboBox:focus {{ border-color: {ACCENT_BLUE}; }}
-QComboBox::drop-down {{ border: none; width: 24px; }}
-QComboBox QAbstractItemView {{
-    background-color: {BG_CARD};
-    color: {TEXT_PRIMARY};
-    selection-background-color: {ACCENT_BLUE};
-    border: 1px solid {BORDER};
-}}
 """
 
 LINEEDIT_STYLE = f"""
@@ -251,7 +188,6 @@ QGroupBox {{
     color: {TEXT_PRIMARY};
     font-size: 12px;
     font-weight: 700;
-    letter-spacing: 0.8px;
     text-transform: uppercase;
 }}
 QGroupBox::title {{
@@ -279,45 +215,17 @@ QTabBar::tab {{
     padding: 7px 18px;
     font-size: 12px;
     font-weight: 600;
-    min-width: 150px;
 }}
 QTabBar::tab:selected {{
     background: {BG_DARK};
     color: {ACCENT_CYAN};
     border-bottom: 2px solid {ACCENT_CYAN};
 }}
-QTabBar::tab:hover:!selected {{
-    background: #1e2336;
-    color: {TEXT_PRIMARY};
-}}
 """
 
 
-# ---------------------------------------------------------------------------
-# CDS Wavelength Calibration Function
-# ---------------------------------------------------------------------------
-
 def calculate_lambda_vec(n_cols: int, theta0_deg: float) -> np.ndarray:
-    """
-    Calculate the CDS wavelength vector lambda(x) for column indices 1 ... N_cols.
-
-    Formula from calculateenergy.m:
-        delta_theta(x) = atan2d((x - x0) * px, R * sind(gamma_toroi))
-        lambda(x) = (d_gt / m_diff) * sind(gamma_toroi) * (sind(theta_0) + sind(theta_0 + delta_theta(x)))
-
-    Parameters
-    ----------
-    n_cols : int
-        Number of detector columns (e.g. 1024 or 2048).
-    theta0_deg : float
-        Adjustable center grating angle theta_0 in degrees.
-
-    Returns
-    -------
-    np.ndarray
-        1-D float64 array of shape (n_cols,), containing wavelength in nm.
-    """
-    x = np.arange(1, n_cols + 1, dtype=np.float64)  # 1-indexed to match MATLAB
+    x = np.arange(1, n_cols + 1, dtype=np.float64)
     gamma_rad = np.radians(GAMMA_TOROI_DEG)
     theta0_rad = np.radians(theta0_deg)
 
@@ -334,10 +242,6 @@ def calculate_lambda_vec(n_cols: int, theta0_deg: float) -> np.ndarray:
     return lambda_vec
 
 
-# ---------------------------------------------------------------------------
-# Settings & State Persistence
-# ---------------------------------------------------------------------------
-
 _DEFAULT_SETTINGS = {
     "exposure_s": 0.1,
     "trigger_mode_idx": 0,
@@ -353,8 +257,6 @@ _DEFAULT_SETTINGS = {
 
 
 class AndorSettings:
-    """JSON file persistence for application state and parameters."""
-
     @staticmethod
     def load(path: pathlib.Path = _SETTINGS_PATH) -> dict:
         settings = dict(_DEFAULT_SETTINGS)
@@ -374,14 +276,9 @@ class AndorSettings:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             tmp_path.replace(path)
-            logger.info("Settings saved to %s", path)
         except Exception as exc:
             logger.warning("Failed to save settings to %s: %s", path, exc)
 
-
-# ---------------------------------------------------------------------------
-# TIFF & Tag Metadata Saving
-# ---------------------------------------------------------------------------
 
 def save_shot_tiff(
     out_dir: str | pathlib.Path,
@@ -390,55 +287,35 @@ def save_shot_tiff(
     bg_b: np.ndarray,
     sub_s: np.ndarray,
     metadata: dict,
+    custom_filename: Optional[str] = None,
 ) -> pathlib.Path:
     """
     Save Raw Signal (D_k), Background (B_k), and Subtracted Signal (S_k)
     as a 3-page TIFF file with embedded JSON metadata in ImageDescription.
-
-    Parameters
-    ----------
-    out_dir : str or Path
-        Target directory to save into.
-    shot_index : int
-        Shot number counter.
-    raw_d : np.ndarray
-        Raw signal data (H x W).
-    bg_b : np.ndarray
-        Background frame (H x W).
-    sub_s : np.ndarray
-        Subtracted signal (H x W, float32).
-    metadata : dict
-        Metadata dictionary to embed.
-
-    Returns
-    -------
-    pathlib.Path
-        Saved TIFF file path.
     """
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    ts_str = metadata.get("timestamp", datetime.datetime.now().isoformat())
-    ts_clean = ts_str.replace(":", "-").replace(".", "-")
-    filename = f"shot_{shot_index:04d}_{ts_clean[:19]}.tiff"
+    if custom_filename:
+        filename = custom_filename
+        if not filename.endswith(".tiff") and not filename.endswith(".tif"):
+            filename += ".tiff"
+    else:
+        ts_str = metadata.get("timestamp", datetime.datetime.now().isoformat())
+        ts_clean = ts_str.replace(":", "-").replace(".", "-")
+        filename = f"shot_{shot_index:04d}_{ts_clean[:19]}.tiff"
+
     file_path = out_dir / filename
 
     meta_json = json.dumps(metadata, indent=2)
-
-    # 3-page stack: page 0 = Raw (D_k), page 1 = Background (B_k), page 2 = Subtracted (S_k)
     stack = np.stack(
         [raw_d.astype(np.float32), bg_b.astype(np.float32), sub_s.astype(np.float32)],
         axis=0,
     )
 
     if _TIFFFILE_AVAILABLE:
-        _tifffile.imwrite(
-            str(file_path),
-            stack,
-            description=meta_json,
-        )
+        _tifffile.imwrite(str(file_path), stack, description=meta_json)
     else:
-        # Fallback to PIL.Image if tifffile is missing
         from PIL import Image
         pages = [
             Image.fromarray(raw_d),
@@ -449,30 +326,18 @@ def save_shot_tiff(
             str(file_path),
             save_all=True,
             append_images=pages[1:],
-            tiffinfo={270: meta_json},  # 270 = ImageDescription
+            tiffinfo={270: meta_json},
         )
 
     logger.info("Saved shot TIFF to %s", file_path)
     return file_path
 
-
-# ---------------------------------------------------------------------------
-# Background Acquisition Workers (QThread isolated)
-# ---------------------------------------------------------------------------
-
 class SingleShotWorker(QObject):
-    """Acquires a single frame without background subtraction."""
-
     frame_ready = Signal(np.ndarray)
     error       = Signal(str)
     finished    = Signal()
 
-    def __init__(
-        self,
-        driver: AndorCameraDriver,
-        exposure_s: float,
-        trigger_mode: int,
-    ) -> None:
+    def __init__(self, driver: AndorCameraDriver, exposure_s: float, trigger_mode: int) -> None:
         super().__init__()
         self._driver       = driver
         self._exposure_s   = exposure_s
@@ -492,7 +357,6 @@ class SingleShotWorker(QObject):
                 frame = self._driver.get_acquired_data16()
                 self.frame_ready.emit(frame)
         except Exception as exc:
-            logger.exception("SingleShotWorker error: %s", exc)
             self.error.emit(str(exc))
         finally:
             try:
@@ -511,26 +375,13 @@ class SingleShotWorker(QObject):
 
 
 class RollingAcquisitionWorker(QObject):
-    """
-    Implements the 4-step rolling background subtraction state machine:
-      a. Acquire initial Background Frame (B_0) using internal trigger (mode 0)
-      b. Await hardware/software trigger for new shot data
-      c. Acquire Raw Data (D_k), compute Cleaned Signal (S_k = D_k - B_{k-1}), and display S_k
-      d. Immediately acquire a new Background Frame (B_k) for the next shot (k+1)
-    """
-
     bg_ready      = Signal(np.ndarray)
-    shot_ready    = Signal(np.ndarray, np.ndarray, np.ndarray, int)  # D_k, B_k, S_k, shot_index
+    shot_ready    = Signal(np.ndarray, np.ndarray, np.ndarray, int)
     status_update = Signal(str)
     error         = Signal(str)
     finished      = Signal()
 
-    def __init__(
-        self,
-        driver: AndorCameraDriver,
-        exposure_s: float,
-        trigger_mode: int,
-    ) -> None:
+    def __init__(self, driver: AndorCameraDriver, exposure_s: float, trigger_mode: int) -> None:
         super().__init__()
         self._driver       = driver
         self._exposure_s   = exposure_s
@@ -551,41 +402,27 @@ class RollingAcquisitionWorker(QObject):
         shot_k = 0
 
         try:
-            # ── Step a: Acquire initial Background Frame B_0 (Internal trigger) ──
             self.status_update.emit("Step a: Acquiring initial background frame B₀…")
             b_prev = self._acquire_frame(trigger_mode=0)
             self.bg_ready.emit(b_prev)
 
-            # ── Rolling loop ──
             while self._running:
                 shot_k += 1
-
-                # ── Step b & c: Await trigger & acquire Raw Data D_k ──
-                self.status_update.emit(
-                    f"Shot {shot_k}: Awaiting trigger & acquiring Raw Data D_{shot_k}…"
-                )
+                self.status_update.emit(f"Shot {shot_k}: Awaiting trigger & acquiring Raw Data D_{shot_k}…")
                 d_k = self._acquire_frame(trigger_mode=self._trigger_mode)
 
                 if not self._running:
                     break
 
-                # Compute Cleaned Signal S_k = D_k - B_{k-1}
                 s_k = d_k.astype(np.float32) - b_prev.astype(np.float32)
 
-                # ── Step d: Immediately acquire new Background Frame B_k ──
-                self.status_update.emit(
-                    f"Shot {shot_k}: Acquiring next background frame B_{shot_k}…"
-                )
+                self.status_update.emit(f"Shot {shot_k}: Acquiring next background frame B_{shot_k}…")
                 b_k = self._acquire_frame(trigger_mode=0)
 
-                # Emit shot data
                 self.shot_ready.emit(d_k, b_k, s_k, shot_k)
-
-                # Roll background: B_k becomes B_{k-1} for shot k+1
                 b_prev = b_k
 
         except Exception as exc:
-            logger.exception("RollingAcquisitionWorker error: %s", exc)
             self.error.emit(str(exc))
         finally:
             try:
@@ -603,24 +440,11 @@ class RollingAcquisitionWorker(QObject):
             pass
 
 
-# ---------------------------------------------------------------------------
-# Stat Badge widget
-# ---------------------------------------------------------------------------
-
 class StatBadge(QFrame):
-    """Labelled badge displaying numerical statistics."""
-
     def __init__(self, label: str, unit: str = "", parent=None) -> None:
         super().__init__(parent)
         self._unit = unit
-        self.setStyleSheet(f"""
-            QFrame {{
-                background-color: rgba(30, 35, 50, 180);
-                border: 1px solid {BORDER};
-                border-radius: 8px;
-                padding: 4px 10px;
-            }}
-        """)
+        self.setStyleSheet(f"QFrame {{ background-color: rgba(30, 35, 50, 180); border: 1px solid {BORDER}; border-radius: 8px; padding: 4px 10px; }}")
         layout = QVBoxLayout(self)
         layout.setSpacing(2)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -636,13 +460,6 @@ class StatBadge(QFrame):
     def set_value(self, v: float) -> None:
         self._val.setText(f"{v:.1f}{self._unit}")
 
-    def clear(self) -> None:
-        self._val.setText("—")
-
-
-# ---------------------------------------------------------------------------
-# Helper: Build pyqtgraph ImageView container
-# ---------------------------------------------------------------------------
 
 def _create_image_view_container(
     colormap: str = "viridis",
@@ -651,7 +468,6 @@ def _create_image_view_container(
     y_label: str = "Y Pixel",
     aspect_locked: bool = True,
 ) -> Tuple[QWidget, pg.ImageView, Tuple[StatBadge, StatBadge, StatBadge]]:
-    """Creates an ImageView with axis labels and statistics badge row inside a dark QWidget."""
     container = QWidget()
     container.setStyleSheet(f"background-color: {BG_DARK};")
     layout = QVBoxLayout(container)
@@ -694,14 +510,8 @@ def _refresh_stats(badges: Tuple[StatBadge, StatBadge, StatBadge], data: np.ndar
     badges[2].set_value(float(data.mean()))
 
 
-# ---------------------------------------------------------------------------
-# Main Application Window
-# ---------------------------------------------------------------------------
-
 class AndorMainWindow(QMainWindow):
-    """
-    Refactored Andor DAQ & Visualizer Main Window.
-    """
+    epics_state_changed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -718,20 +528,24 @@ class AndorMainWindow(QMainWindow):
         self._last_bg:     Optional[np.ndarray] = None
         self._last_sub:    Optional[np.ndarray] = None
 
-        # Load persisted settings
+        self._epics_state_pv = None
+        self._last_epics_state = None
+
         self._settings = AndorSettings.load()
 
         self._setup_ui()
         self._apply_global_style()
         self._restore_settings()
+        self._setup_epics_listeners()
         self._update_button_states()
 
-    # ------------------------------------------------------------------
-    # UI Setup
-    # ------------------------------------------------------------------
+        self.display_timer = QTimer(self)
+        self.display_timer.setInterval(100)
+        self.display_timer.timeout.connect(self._on_display_tick)
+        self.display_timer.start()
 
     def _setup_ui(self) -> None:
-        self.setWindowTitle("Andor CCD DAQ & Wavelength Spectrometer")
+        self.setWindowTitle("Andor CCD Spectrometer DAQ & EPICS Diagnostic")
         self.resize(1420, 860)
 
         central = QWidget()
@@ -740,10 +554,8 @@ class AndorMainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        # Header bar
         root_layout.addWidget(self._make_header())
 
-        # Main splitter (Controls on left, Tabbed visualizer on right)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(3)
         splitter.setStyleSheet(f"QSplitter::handle {{ background: {BORDER}; }}")
@@ -754,54 +566,27 @@ class AndorMainWindow(QMainWindow):
 
         root_layout.addWidget(splitter)
 
-        # Status bar
-        self.statusBar().setStyleSheet(f"""
-            QStatusBar {{
-                background: {BG_PANEL};
-                color: {TEXT_MUTED};
-                font-size: 11px;
-                border-top: 1px solid {BORDER};
-                padding: 3px 12px;
-            }}
-        """)
+        self.statusBar().setStyleSheet(f"QStatusBar {{ background: {BG_PANEL}; color: {TEXT_MUTED}; font-size: 11px; border-top: 1px solid {BORDER}; padding: 3px 12px; }}")
         self._status_label = QLabel("Ready")
         self._mode_badge   = QLabel("● SIMULATION")
-        self._mode_badge.setStyleSheet(
-            f"color: {ACCENT_AMBER}; font-weight: 700; font-size: 11px;"
-        )
+        self._mode_badge.setStyleSheet(f"color: {ACCENT_AMBER}; font-weight: 700; font-size: 11px;")
         self.statusBar().addWidget(self._status_label)
         self.statusBar().addPermanentWidget(self._mode_badge)
 
     def _make_header(self) -> QWidget:
         header = QWidget()
         header.setFixedHeight(56)
-        header.setStyleSheet(f"""
-            QWidget {{
-                background: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:0,
-                    stop:0 {BG_PANEL},
-                    stop:1 #111827
-                );
-                border-bottom: 1px solid {BORDER};
-            }}
-        """)
+        header.setStyleSheet(f"QWidget {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {BG_PANEL}, stop:1 #111827); border-bottom: 1px solid {BORDER}; }}")
         lay = QHBoxLayout(header)
         lay.setContentsMargins(20, 0, 20, 0)
 
-        title = QLabel("⬡  Andor CCD Spectrometer DAQ")
-        title.setStyleSheet(f"""
-            color: {TEXT_PRIMARY};
-            font-size: 17px;
-            font-weight: 700;
-            letter-spacing: 0.5px;
-        """)
+        title = QLabel("⬡  Andor CCD Spectrometer DAQ System")
+        title.setStyleSheet(f"color: {TEXT_PRIMARY}; font-size: 17px; font-weight: 700;")
         lay.addWidget(title)
         lay.addStretch()
 
         self._frame_counter_lbl = QLabel("Frames: 0  |  Shots: 0")
-        self._frame_counter_lbl.setStyleSheet(
-            f"color: {ACCENT_CYAN}; font-size: 12px; font-weight: 600;"
-        )
+        self._frame_counter_lbl.setStyleSheet(f"color: {ACCENT_CYAN}; font-size: 12px; font-weight: 600;")
         lay.addWidget(self._frame_counter_lbl)
 
         return header
@@ -810,9 +595,7 @@ class AndorMainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            f"QScrollArea {{ background: {BG_PANEL}; border: none; }}"
-        )
+        scroll.setStyleSheet(f"QScrollArea {{ background: {BG_PANEL}; border: none; }}")
 
         inner = QWidget()
         inner.setStyleSheet(f"background-color: {BG_PANEL};")
@@ -842,9 +625,7 @@ class AndorMainWindow(QMainWindow):
         sdk_lbl = QLabel("SDK Path")
         sdk_lbl.setStyleSheet(LABEL_STYLE)
         self._sdk_path_lbl = QLabel(r"C:\Program Files\Andor SDK")
-        self._sdk_path_lbl.setStyleSheet(
-            f"color: {TEXT_MUTED}; font-size: 10px; word-wrap: break-word;"
-        )
+        self._sdk_path_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px;")
         self._sdk_path_lbl.setWordWrap(True)
 
         sim_row = QHBoxLayout()
@@ -861,9 +642,7 @@ class AndorMainWindow(QMainWindow):
         self._init_btn.clicked.connect(self._on_initialize)
 
         self._detector_lbl = QLabel("Detector: —")
-        self._detector_lbl.setStyleSheet(
-            f"color: {ACCENT_CYAN}; font-size: 11px; font-weight: 600;"
-        )
+        self._detector_lbl.setStyleSheet(f"color: {ACCENT_CYAN}; font-size: 11px; font-weight: 600;")
 
         lay.addWidget(sdk_lbl)
         lay.addWidget(self._sdk_path_lbl)
@@ -899,10 +678,7 @@ class AndorMainWindow(QMainWindow):
         trig_lbl = QLabel("Signal Trigger Mode")
         trig_lbl.setStyleSheet(LABEL_STYLE)
         self._trig_combo = QComboBox()
-        self._trig_combo.addItems([
-            "Internal Trigger (Mode 0)",
-            "External Trigger (Mode 1)",
-        ])
+        self._trig_combo.addItems(["Internal Trigger (Mode 0)", "External Trigger (Mode 1)"])
         self._trig_combo.setStyleSheet(COMBO_STYLE)
 
         lay.addWidget(exp_lbl)
@@ -930,9 +706,7 @@ class AndorMainWindow(QMainWindow):
         self._theta0_spin.valueChanged.connect(self._on_theta0_changed)
 
         self._wl_range_lbl = QLabel("λ Range: — nm")
-        self._wl_range_lbl.setStyleSheet(
-            f"color: {ACCENT_VIOLET}; font-size: 11px; font-weight: 600;"
-        )
+        self._wl_range_lbl.setStyleSheet(f"color: {ACCENT_VIOLET}; font-size: 11px; font-weight: 600;")
 
         lay.addWidget(theta_lbl)
         lay.addWidget(self._theta0_spin)
@@ -966,11 +740,7 @@ class AndorMainWindow(QMainWindow):
         mode_lbl.setStyleSheet(LABEL_STYLE)
 
         self._save_mode_combo = QComboBox()
-        self._save_mode_combo.addItems([
-            "Manual (Click 'Save Current Data')",
-            "Auto-Save Every Shot",
-            "Do Not Save",
-        ])
+        self._save_mode_combo.addItems(["Manual (Click 'Save Current Data')", "Auto-Save Every Shot", "Do Not Save"])
         self._save_mode_combo.setStyleSheet(COMBO_STYLE)
 
         self._output_save_btn = QPushButton("💾  Save Current Data")
@@ -1009,10 +779,7 @@ class AndorMainWindow(QMainWindow):
         cmap_lbl = QLabel("Colormap")
         cmap_lbl.setStyleSheet(LABEL_STYLE)
         self._cmap_combo = QComboBox()
-        self._cmap_combo.addItems([
-            "viridis", "inferno", "plasma", "magma",
-            "grey", "hot", "thermal",
-        ])
+        self._cmap_combo.addItems(["viridis", "inferno", "plasma", "magma", "grey", "hot", "thermal"])
         self._cmap_combo.setStyleSheet(COMBO_STYLE)
         self._cmap_combo.currentTextChanged.connect(self._on_cmap_change)
 
@@ -1058,21 +825,154 @@ class AndorMainWindow(QMainWindow):
         self._tab_widget = QTabWidget()
         self._tab_widget.setStyleSheet(TAB_STYLE)
 
-        # Tab 1: Raw Image (pixel coordinates)
-        raw_widget, self._raw_iv, self._raw_stats = _create_image_view_container(
-            x_label="X Pixel", y_label="Y Pixel", aspect_locked=True
-        )
-        self._tab_widget.addTab(raw_widget, "📷  Raw Image")
+        self.tab_live = self._make_live_tab_widget()
+        self._tab_widget.addTab(self.tab_live, "🎥 Live View & Spectrometer Diagnostic")
 
-        # Tab 2: Wavelength Calibrated (nm coordinates)
-        cal_widget, self._cal_iv, self._cal_stats = _create_image_view_container(
-            x_label="Wavelength", x_units="nm", y_label="Y Pixel", aspect_locked=False
-        )
-        self._tab_widget.addTab(cal_widget, "〜  Wavelength Calibrated")
+        self.tab_epics = QWidget()
+        self._build_tab_epics(self.tab_epics)
+        self._tab_widget.addTab(self.tab_epics, "⚡ EPICS DAQ Mode")
+
+        self.tab_sys_log = QWidget()
+        self._build_tab_sys_log(self.tab_sys_log)
+        self._tab_widget.addTab(self.tab_sys_log, "📜 System & Event Log")
+
         self._tab_widget.currentChanged.connect(self._on_tab_changed)
 
         layout.addWidget(self._tab_widget)
         return container
+
+    def _make_live_tab_widget(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        sub_tabs = QTabWidget()
+        sub_tabs.setStyleSheet(TAB_STYLE)
+
+        raw_widget, self._raw_iv, self._raw_stats = _create_image_view_container(
+            x_label="X Pixel", y_label="Y Pixel", aspect_locked=True
+        )
+        sub_tabs.addTab(raw_widget, "📷 Raw Image")
+
+        cal_widget, self._cal_iv, self._cal_stats = _create_image_view_container(
+            x_label="Wavelength", x_units="nm", y_label="Y Pixel", aspect_locked=False
+        )
+        sub_tabs.addTab(cal_widget, "〜 Wavelength Calibrated")
+
+        layout.addWidget(sub_tabs)
+        return widget
+
+    def _build_tab_epics(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        self.epics_banner_label = QLabel("EPICS IOC: DISCONNECTED | Mode: UNKNOWN")
+        self.epics_banner_label.setStyleSheet("background-color: #f44336; color: white; font-weight: bold; font-size: 14px; padding: 10px; border-radius: 6px;")
+        self.epics_banner_label.setAlignment(Qt.AlignmentFlag.AlignCenter if hasattr(Qt, "AlignmentFlag") else Qt.AlignCenter)
+        layout.addWidget(self.epics_banner_label)
+
+        pv_group = QGroupBox("EPICS Channel Access PV Status Readouts")
+        f_layout = QFormLayout(pv_group)
+
+        self.pv_state_label = QLabel("IDLE")
+        self.pv_state_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 14px;")
+        f_layout.addRow("Sequence State (EXP:Seq:State):", self.pv_state_label)
+
+        self.pv_cam_mode_label = QLabel("SIMULATED")
+        self.pv_cam_mode_label.setStyleSheet("color: #f59e0b; font-weight: bold;")
+        f_layout.addRow("Camera Mode (EXP:Seq:CameraMode):", self.pv_cam_mode_label)
+
+        self.pv_cam_status_label = QLabel("CONNECTED")
+        self.pv_cam_status_label.setStyleSheet("color: #10b981; font-weight: bold;")
+        f_layout.addRow("Camera Status (EXP:Seq:CameraStatus):", self.pv_cam_status_label)
+
+        self.pv_filename_label = QLabel("exp_run")
+        self.pv_filename_label.setStyleSheet("color: #f1f5f9; font-weight: bold;")
+        f_layout.addRow("Active Filename (EXP:Seq:FileName):", self.pv_filename_label)
+
+        self.pv_shot_label = QLabel("0")
+        self.pv_shot_label.setStyleSheet("color: #f1f5f9; font-weight: bold;")
+        f_layout.addRow("Current Shot # (EXP:Seq:ShotNumber):", self.pv_shot_label)
+
+        layout.addWidget(pv_group)
+
+        daq_img_group = QGroupBox("EPICS DAQ Calibrated Spectrum Viewport")
+        daq_img_layout = QVBoxLayout(daq_img_group)
+
+        daq_widget, self._daq_cal_iv, self._daq_cal_stats = _create_image_view_container(
+            x_label="Wavelength", x_units="nm", y_label="Y Pixel", aspect_locked=False
+        )
+        daq_img_layout.addWidget(daq_widget)
+        layout.addWidget(daq_img_group, stretch=1)
+
+    def _build_tab_sys_log(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        hw_group = QGroupBox("Actual Andor Camera Hardware Readbacks")
+        hw_layout = QFormLayout(hw_group)
+
+        self.lbl_hw_exp = QLabel("0.00 ms")
+        self.lbl_hw_exp.setStyleSheet("color: #f1f5f9; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Actual Exposure Time:", self.lbl_hw_exp)
+
+        self.lbl_hw_trig = QLabel("INTERNAL/OFF")
+        self.lbl_hw_trig.setStyleSheet("color: #38bdf8; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Trigger Mode:", self.lbl_hw_trig)
+
+        self.lbl_hw_det = QLabel("0 x 0 px")
+        self.lbl_hw_det.setStyleSheet("color: #f1f5f9; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Detector Size:", self.lbl_hw_det)
+
+        self.lbl_hw_status = QLabel("DRV_IDLE")
+        self.lbl_hw_status.setStyleSheet("color: #10b981; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Driver Status:", self.lbl_hw_status)
+
+        self.lbl_hw_mode = QLabel("SIMULATED")
+        self.lbl_hw_mode.setStyleSheet("color: #f59e0b; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Hardware Mode:", self.lbl_hw_mode)
+
+        layout.addWidget(hw_group)
+
+        log_group = QGroupBox("System & DAQ Event Log (全系統日誌)")
+        log_layout = QVBoxLayout(log_group)
+
+        self.daq_log_edit = QTextEdit()
+        self.daq_log_edit.setReadOnly(True)
+        self.daq_log_edit.setStyleSheet("background-color: #1e1e1e; color: #dcdcdc; font-family: Consolas, monospace;")
+        log_layout.addWidget(self.daq_log_edit)
+
+        btn_clear_log = QPushButton("Clear Log")
+        btn_clear_log.setStyleSheet(BUTTON_STYLE_PRIMARY)
+        btn_clear_log.clicked.connect(self._clear_log)
+        log_layout.addWidget(
+            btn_clear_log,
+            alignment=Qt.AlignmentFlag.AlignRight if hasattr(Qt, "AlignmentFlag") else Qt.AlignRight
+        )
+
+        layout.addWidget(log_group, stretch=1)
+
+    def log(self, message: str, level: str = "INFO"):
+        timestamp = time.strftime("%H:%M:%S")
+        color_map = {
+            "INFO": "#dcdcdc",
+            "WARNING": "#f59e0b",
+            "ERROR": "#ef4444",
+            "SUCCESS": "#10b981",
+        }
+        color = color_map.get(level.upper(), "#dcdcdc")
+        formatted_msg = (
+            f'<span style="color: #888888;">[{timestamp}]</span> '
+            f'<b style="color: {color};">[{level.upper()}]</b> {message}'
+        )
+        self.daq_log_edit.append(formatted_msg)
+        self.daq_log_edit.moveCursor(QtGui.QTextCursor.MoveOperation.End if hasattr(QtGui, "QTextCursor") else QtGui.QTextCursor.End)
+
+    def _clear_log(self):
+        self.daq_log_edit.clear()
+        self.log("Event log cleared.")
 
     def _apply_global_style(self) -> None:
         self.setStyleSheet(f"""
@@ -1081,29 +981,7 @@ class AndorMainWindow(QMainWindow):
                 color: {TEXT_PRIMARY};
                 font-family: 'Segoe UI', 'Inter', sans-serif;
             }}
-            QScrollBar:vertical {{
-                background: {BG_DARK};
-                width: 8px;
-                border-radius: 4px;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {BORDER};
-                border-radius: 4px;
-            }}
-            QScrollBar:horizontal {{
-                background: {BG_DARK};
-                height: 8px;
-                border-radius: 4px;
-            }}
-            QScrollBar::handle:horizontal {{
-                background: {BORDER};
-                border-radius: 4px;
-            }}
         """)
-
-    # ------------------------------------------------------------------
-    # State Persistence
-    # ------------------------------------------------------------------
 
     def _restore_settings(self) -> None:
         s = self._settings
@@ -1142,10 +1020,6 @@ class AndorMainWindow(QMainWindow):
             "window_geometry":  bytes(self.saveGeometry()).hex(),
         }
 
-    # ------------------------------------------------------------------
-    # Calibration Helpers
-    # ------------------------------------------------------------------
-
     def _update_wavelength_vector(self, n_cols: Optional[int] = None) -> None:
         if n_cols is None:
             n_cols = self._driver.width if (self._driver and self._driver.is_initialized) else 1024
@@ -1157,9 +1031,6 @@ class AndorMainWindow(QMainWindow):
         self._wl_range_lbl.setText(f"λ Range: {wl_min:.2f} – {wl_max:.2f} nm")
 
     def _apply_calibrated_image(self, data_s: np.ndarray) -> None:
-        """
-        Display 2D data (H x W) in the calibrated tab with X-axis scaled in nm.
-        """
         h, w = data_s.shape
         if self._lambda_vec is None or len(self._lambda_vec) != w:
             self._update_wavelength_vector(w)
@@ -1170,12 +1041,10 @@ class AndorMainWindow(QMainWindow):
         wl_span = wl_max - wl_min
         dx = wl_span / float(w)
 
-        # Apply QTransform to map pixel column [0 ... W] to [wl_min ... wl_max]
         tr = QTransform()
         tr.translate(wl_min, 0.0)
         tr.scale(dx, 1.0)
 
-        # pyqtgraph ImageView displays (W, H)
         self._cal_iv.setImage(
             data_s.T,
             autoRange=False,
@@ -1188,6 +1057,34 @@ class AndorMainWindow(QMainWindow):
         vb.setAspectLocked(False)
         vb.setRange(xRange=[wl_min, wl_max], yRange=[0, h], padding=0.0)
         _refresh_stats(self._cal_stats, data_s)
+
+    def _apply_daq_calibrated_image(self, data_s: np.ndarray) -> None:
+        h, w = data_s.shape
+        if self._lambda_vec is None or len(self._lambda_vec) != w:
+            self._update_wavelength_vector(w)
+
+        lv = self._lambda_vec
+        wl_min = float(lv[0])
+        wl_max = float(lv[-1])
+        wl_span = wl_max - wl_min
+        dx = wl_span / float(w)
+
+        tr = QTransform()
+        tr.translate(wl_min, 0.0)
+        tr.scale(dx, 1.0)
+
+        self._daq_cal_iv.setImage(
+            data_s.T,
+            autoRange=False,
+            autoLevels=True,
+            autoHistogramRange=True,
+            transform=tr,
+        )
+
+        vb = self._daq_cal_iv.getView()
+        vb.setAspectLocked(False)
+        vb.setRange(xRange=[wl_min, wl_max], yRange=[0, h], padding=0.0)
+        _refresh_stats(self._daq_cal_stats, data_s)
 
     def _build_metadata(self) -> dict:
         cam_serial = "SIM-MOCK-01"
@@ -1207,10 +1104,6 @@ class AndorMainWindow(QMainWindow):
             "wavelength_range_nm": wl_range,
             "user_note": self._note_edit.text().strip(),
         }
-
-    # ------------------------------------------------------------------
-    # Slots & Action Handlers
-    # ------------------------------------------------------------------
 
     @Slot()
     def _on_initialize(self) -> None:
@@ -1237,12 +1130,9 @@ class AndorMainWindow(QMainWindow):
         is_sim = self._driver.is_simulated
         self._mode_badge.setText("● SIMULATION" if is_sim else "● HARDWARE")
         self._mode_badge.setStyleSheet(
-            f"color: {ACCENT_AMBER if is_sim else ACCENT_EMERALD}; "
-            f"font-weight: 700; font-size: 11px;"
+            f"color: {ACCENT_AMBER if is_sim else ACCENT_EMERALD}; font-weight: 700; font-size: 11px;"
         )
-        self._set_status(
-            f"Camera initialized ({'simulation' if is_sim else 'hardware'} – {w}×{h} px)"
-        )
+        self._set_status(f"Camera initialized ({'simulation' if is_sim else 'hardware'} – {w}×{h} px)")
         self._update_wavelength_vector()
         self._update_button_states()
 
@@ -1316,16 +1206,10 @@ class AndorMainWindow(QMainWindow):
         self._last_sub = frame.astype(np.float32)
         self._update_counter_label()
 
-        # Update Tab 1 (Raw Image)
-        self._raw_iv.setImage(
-            frame.T, autoRange=False, autoLevels=True, autoHistogramRange=True
-        )
+        self._raw_iv.setImage(frame.T, autoRange=False, autoLevels=True, autoHistogramRange=True)
         _refresh_stats(self._raw_stats, frame)
-
-        # Update Tab 2 (Wavelength Calibrated - single shot shown without subtraction)
         self._apply_calibrated_image(frame.astype(np.float32))
 
-        # Auto-save if configured
         if self._should_auto_save():
             self._save_current_data(is_auto=True)
 
@@ -1334,51 +1218,36 @@ class AndorMainWindow(QMainWindow):
         self._frame_count += 1
         self._last_bg = bg_0
         self._update_counter_label()
-        self._raw_iv.setImage(
-            bg_0.T, autoRange=False, autoLevels=True, autoHistogramRange=True
-        )
+        self._raw_iv.setImage(bg_0.T, autoRange=False, autoLevels=True, autoHistogramRange=True)
         _refresh_stats(self._raw_stats, bg_0)
         self._set_status("Initial background B₀ acquired. Awaiting shot trigger…")
 
     @Slot(np.ndarray, np.ndarray, np.ndarray, int)
-    def _on_rolling_shot_ready(
-        self, d_k: np.ndarray, b_k: np.ndarray, s_k: np.ndarray, shot_k: int
-    ) -> None:
+    def _on_rolling_shot_ready(self, d_k: np.ndarray, b_k: np.ndarray, s_k: np.ndarray, shot_k: int) -> None:
         self._shot_count = shot_k
-        self._frame_count += 2  # D_k and B_k
+        self._frame_count += 2
         self._last_raw = d_k
         self._last_bg = b_k
         self._last_sub = s_k
         self._update_counter_label()
 
-        # Update Tab 1: Raw Image D_k
-        self._raw_iv.setImage(
-            d_k.T, autoRange=False, autoLevels=True, autoHistogramRange=True
-        )
+        self._raw_iv.setImage(d_k.T, autoRange=False, autoLevels=True, autoHistogramRange=True)
         _refresh_stats(self._raw_stats, d_k)
-
-        # Update Tab 2: Wavelength Calibrated Cleaned Signal S_k
         self._apply_calibrated_image(s_k)
 
-        # Auto-save TIFF if configured
         if self._should_auto_save():
             self._save_current_data(is_auto=True)
 
     def _save_current_data(self, is_auto: bool = False) -> Optional[pathlib.Path]:
-        """Save the last acquired shot / frame to a multi-page TIFF file with metadata."""
         if self._last_raw is None:
             if not is_auto:
-                QMessageBox.information(
-                    self, "No Data", "No frame or shot data has been acquired yet to save."
-                )
+                QMessageBox.information(self, "No Data", "No frame or shot data has been acquired yet to save.")
             return None
 
         out_dir = self._out_dir_edit.text().strip()
         if not out_dir:
             if not is_auto:
-                selected = QFileDialog.getExistingDirectory(
-                    self, "Select Destination Output Folder", str(pathlib.Path.home())
-                )
+                selected = QFileDialog.getExistingDirectory(self, "Select Destination Output Folder", str(pathlib.Path.home()))
                 if selected:
                     self._out_dir_edit.setText(selected)
                     out_dir = selected
@@ -1407,7 +1276,6 @@ class AndorMainWindow(QMainWindow):
 
     @Slot()
     def _on_save_data_clicked(self) -> None:
-        """Triggered manually by clicking the 'Save Current Data' button."""
         saved = self._save_current_data(is_auto=False)
         if saved:
             self.statusBar().showMessage(f"✓ Saved current data to {saved.name}", 4000)
@@ -1424,9 +1292,7 @@ class AndorMainWindow(QMainWindow):
 
     @Slot()
     def _on_rolling_finished(self) -> None:
-        self._set_status(
-            f"Rolling loop stopped – Shots: {self._shot_count}, Frames: {self._frame_count}"
-        )
+        self._set_status(f"Rolling loop stopped – Shots: {self._shot_count}, Frames: {self._frame_count}")
         self._update_button_states(acquiring=False)
 
     @Slot()
@@ -1449,7 +1315,7 @@ class AndorMainWindow(QMainWindow):
 
     @Slot(str)
     def _on_cmap_change(self, cmap_name: str) -> None:
-        for iv in (self._raw_iv, self._cal_iv):
+        for iv in (self._raw_iv, self._cal_iv, self._daq_cal_iv):
             try:
                 iv.ui.histogram.gradient.loadPreset(cmap_name)
             except KeyError:
@@ -1466,37 +1332,125 @@ class AndorMainWindow(QMainWindow):
     @Slot(int)
     def _on_tab_changed(self, index: int) -> None:
         if index == 1:
-            if self._last_sub is not None:
-                self._apply_calibrated_image(self._last_sub)
-            elif self._last_raw is not None:
-                self._apply_calibrated_image(self._last_raw.astype(np.float32))
+            if self._driver and self._driver.is_initialized:
+                self._driver.set_trigger_mode(1)
+            self.statusBar().showMessage("Switched to EPICS DAQ Mode -> Locked to EXTERNAL_TTL Trigger")
+            self.log("Entered EPICS DAQ Mode: Enforced EXTERNAL_TTL trigger mode.", "INFO")
 
     @Slot()
     def _on_browse_output_dir(self) -> None:
         current = self._out_dir_edit.text().strip() or str(pathlib.Path.home())
-        selected = QFileDialog.getExistingDirectory(
-            self, "Select Destination Output Folder", current
-        )
+        selected = QFileDialog.getExistingDirectory(self, "Select Destination Output Folder", current)
         if selected:
             self._out_dir_edit.setText(selected)
 
-    # ------------------------------------------------------------------
-    # Helper Queries
-    # ------------------------------------------------------------------
+    def _setup_epics_listeners(self):
+        try:
+            import epics
+            self.epics_state_changed.connect(self._handle_epics_auto_sequence)
+            self._epics_state_pv = epics.PV("EXP:Seq:State", callback=self._on_epics_state_change)
+            self.log("Subscribed to EPICS PV: EXP:Seq:State", "INFO")
+        except Exception as e:
+            self.log(f"Failed to subscribe to EPICS state PV: {e}", "WARNING")
+
+    def _on_epics_state_change(self, pvname=None, value=None, **kwargs):
+        if value is not None:
+            self.epics_state_changed.emit(str(value))
+
+    def _handle_epics_auto_sequence(self, new_state: str):
+        self.pv_state_label.setText(new_state)
+
+        try:
+            import epics
+            fn_val = epics.caget("EXP:Seq:FileName", as_string=True)
+            sn_val = epics.caget("EXP:Seq:ShotNumber")
+
+            fn = fn_val if fn_val is not None else "exp_run"
+            sn = sn_val if sn_val is not None else 0
+
+            self.pv_filename_label.setText(str(fn))
+            self.pv_shot_label.setText(str(sn))
+        except Exception as e:
+            fn, sn = "exp_run", 0
+            self.log(f"Failed reading EPICS PVs: {e}", "WARNING")
+
+        if new_state == self._last_epics_state:
+            return
+
+        self.log(f"EPICS State Transition: {self._last_epics_state} -> {new_state}", "INFO")
+
+        if new_state == "ARMED":
+            if self._last_bg is None and self._driver and self._driver.is_initialized:
+                self.log("⚡ [ARMED] No initial background found. Acquiring B₀ with Internal Trigger...", "INFO")
+                try:
+                    b_0 = self._driver.acquire_single_frame(exposure_s=self._exp_spin.value(), trigger_mode=0)
+                    self._last_bg = b_0
+                    self.log(f"⚡ [ARMED] Initial background B₀ acquired (Mean: {np.mean(b_0):.1f} ADU).", "SUCCESS")
+                except Exception as exc:
+                    self.log(f"❌ [ARMED ERROR] Failed acquiring B₀: {exc}", "ERROR")
+
+            if self._driver and self._driver.is_initialized:
+                self._driver.set_trigger_mode(1)
+                self._driver.set_acquisition_params(num_frames=1, acq_mode=1)
+                self._driver.start_acquisition()
+                self.log("⚡ [ARMED] Locked to EXTERNAL_TTL trigger and armed Andor buffer.", "SUCCESS")
+
+        elif new_state == "ACQUIRING":
+            self.log("⚡ [ACQUIRING] Andor camera listening, awaiting DG645 TTL trigger pulse...", "INFO")
+
+        elif new_state == "SAVING":
+            try:
+                if self._driver and self._driver.is_initialized:
+                    d_k = self._driver.get_acquired_data16()
+                    b_prev = self._last_bg if self._last_bg is not None else np.zeros_like(d_k)
+                    s_k = d_k.astype(np.float32) - b_prev.astype(np.float32)
+
+                    self.log(f"⚡ [SAVING] Acquiring rolling background B_{int(sn)}...", "INFO")
+                    b_k = self._driver.acquire_single_frame(exposure_s=self._exp_spin.value(), trigger_mode=0)
+
+                    self._last_raw = d_k
+                    self._last_bg = b_k
+                    self._last_sub = s_k
+                    self._shot_count = int(sn)
+
+                    # 獨立的 DAQ 資料夾路徑
+                    daq_dir = self._out_dir_edit.text().strip() or os.path.join(os.path.dirname(__file__), "data_epics")
+                    os.makedirs(daq_dir, exist_ok=True)
+                    
+                    # 嚴格符合 <FilenameFromCA>_shot_<ShotNumber:04d>.tiff (不含 ISO 時間戳記)
+                    exact_filename = f"{fn}_shot_{int(sn):04d}.tiff"
+                    filepath = save_shot_tiff(
+                        out_dir=daq_dir,
+                        shot_index=int(sn),
+                        raw_d=d_k,
+                        bg_b=b_k,
+                        sub_s=s_k,
+                        metadata=self._build_metadata(),
+                        custom_filename=exact_filename
+                    )
+
+                    self._apply_daq_calibrated_image(s_k)
+                    self.log(f"💾 [SAVING AUTO-SAVE] Saved 3-Page TIFF & metadata: {filepath}", "SUCCESS")
+            except Exception as e:
+                self.log(f"❌ [SAVING ERROR] Failed executing Rolling BG DAQ save: {e}", "ERROR")
+
+        self._last_epics_state = new_state
+
+    def _on_display_tick(self):
+        if self._driver and self._driver.is_initialized:
+            info = self._driver.get_camera_status_info()
+            self.lbl_hw_exp.setText(f"{info.get('exposure_ms', 0.0):.2f} ms")
+            self.lbl_hw_trig.setText(str(info.get('trigger_mode', 'N/A')))
+            self.lbl_hw_det.setText(str(info.get('detector_size', 'N/A')))
+            self.lbl_hw_status.setText(str(info.get('status_str', 'N/A')))
+            self.lbl_hw_mode.setText(str(info.get('mode', 'N/A')))
 
     def _should_auto_save(self) -> bool:
-        # Index 1 = "Auto-Save Every Shot"
-        return (
-            self._save_mode_combo.currentIndex() == 1
-            and bool(self._out_dir_edit.text().strip())
-        )
+        return self._save_mode_combo.currentIndex() == 1 and bool(self._out_dir_edit.text().strip())
 
     def _check_camera_ready(self) -> bool:
         if self._driver is None or not self._driver.is_initialized:
-            QMessageBox.warning(
-                self, "Camera Not Ready",
-                "Please initialize the camera first."
-            )
+            QMessageBox.warning(self, "Camera Not Ready", "Please initialize the camera first.")
             return False
         return True
 
@@ -1511,9 +1465,7 @@ class AndorMainWindow(QMainWindow):
         return False
 
     def _update_counter_label(self) -> None:
-        self._frame_counter_lbl.setText(
-            f"Frames: {self._frame_count}  |  Shots: {self._shot_count}"
-        )
+        self._frame_counter_lbl.setText(f"Frames: {self._frame_count}  |  Shots: {self._shot_count}")
 
     def _set_status(self, msg: str) -> None:
         self._status_label.setText(msg)
@@ -1529,16 +1481,10 @@ class AndorMainWindow(QMainWindow):
         self._gain_spin.setEnabled(not acquiring)
         self._trig_combo.setEnabled(not acquiring)
         self._sim_combo.setEnabled(not acquiring)
-        # Save buttons are always enabled once UI is ready
         self._save_btn.setEnabled(True)
         self._output_save_btn.setEnabled(True)
 
-    # ------------------------------------------------------------------
-    # Application Shutdown
-    # ------------------------------------------------------------------
-
     def closeEvent(self, event) -> None:
-        # Stop background workers
         if self._single_worker:
             self._single_worker.stop()
         if self._rolling_worker:
@@ -1564,21 +1510,12 @@ class AndorMainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # Persist settings to JSON
         AndorSettings.save(self._collect_settings())
-
         super().closeEvent(event)
 
 
-# ---------------------------------------------------------------------------
-# Entry Point
-# ---------------------------------------------------------------------------
-
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s – %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s – %(message)s")
     app = QApplication(sys.argv)
     app.setApplicationName("Andor CCD Spectrometer DAQ")
     app.setOrganizationName("DAQ_CA")
