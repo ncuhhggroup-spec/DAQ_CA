@@ -8,6 +8,7 @@ Supports:
 - Setting delays for 4 output pulse channels (AB, CD, EF, GH) with 1 ms pulse width
 - Dedicated Single-Shot Trigger / Arm button
 - Live serial communication log
+- EPICS State Monitoring & Auto-Triggering on ACQUIRING
 """
 
 import sys
@@ -34,6 +35,10 @@ class DG645App(tk.Tk):
             pass
 
         self.dg: DG645 = None
+
+        # EPICS State & Auto-Triggering tracking variables
+        self._last_epics_state = None
+        self._epics_state_pv = None
 
         # Build UI layout
         self._create_widgets()
@@ -306,7 +311,7 @@ class DG645App(tk.Tk):
             self.status_label.config(foreground="black")
             self.log("Disconnected from serial port.")
 
-            # 【新增】斷開串口時，將 EPICS PV 切回 SIMULATED / DISCONNECTED
+            # Update EPICS PVs to SIMULATED / DISCONNECTED
             try:
                 import epics
                 epics.caput("EXP:Seq:DG645Mode", "SIMULATED")
@@ -330,7 +335,7 @@ class DG645App(tk.Tk):
                 # Auto-query current mode
                 self._read_current_delays()
 
-                # 【新增】實體 COM 埠連線成功後，通知 EPICS IOC 切換為 REAL 與 CONNECTED
+                # Update EPICS PVs to REAL / CONNECTED
                 try:
                     import epics
                     epics.caput("EXP:Seq:DG645Mode", "REAL")
@@ -354,7 +359,6 @@ class DG645App(tk.Tk):
             return
 
         mode_str = self.trig_mode_var.get()
-        # Extract code:
         if "TSRC 3" in mode_str:
             code = 3
         elif "TSRC 4" in mode_str:
@@ -409,7 +413,6 @@ class DG645App(tk.Tk):
             return
 
         try:
-            # Query trigger source
             tsrc = self.dg.get_trigger_source()
             for opt in self.trig_combo["values"]:
                 if f"TSRC {tsrc}" in opt:
@@ -417,16 +420,13 @@ class DG645App(tk.Tk):
                     break
             self.log(f"Current Trigger Source: TSRC {tsrc}")
 
-            # Query trigger level
             tlvl = self.dg.get_trigger_level()
             self.trig_level_var.set(f"{tlvl:.3f}")
 
-            # Query channel delays
             delays = self.dg.get_all_delays()
             names = ["AB", "CD", "EF", "GH"]
             for idx, name in enumerate(names, start=1):
                 d_sec = delays[name]['delay']
-                # Pick sensible unit display
                 if d_sec >= 1.0 or d_sec == 0.0:
                     self.ch_entries[idx]['val'].set(f"{d_sec:.6f}")
                     self.ch_entries[idx]['unit'].set("s")
@@ -465,7 +465,6 @@ class DG645App(tk.Tk):
             return
 
         try:
-            # Animate button momentarily
             orig_bg = self.btn_single_shot.cget("bg")
             self.btn_single_shot.config(bg="#ff9800", text="⚡ TRIGGER / ARM SENT ⚡")
             self.update_idletasks()
@@ -477,6 +476,44 @@ class DG645App(tk.Tk):
         except Exception as e:
             self.log(f"Error sending trigger: {e}", "ERROR")
             messagebox.showerror("Trigger Error", f"Failed to send trigger command:\n{e}")
+
+    # -------------------------------------------------------------------------
+    # EPICS Auto-Triggering & Status Monitoring
+    # -------------------------------------------------------------------------
+
+    def _setup_epics_state_listener(self):
+        """Subscribe to EXP:Seq:State PV for real-time state change callbacks."""
+        if self._epics_state_pv is None:
+            try:
+                import epics
+                self._epics_state_pv = epics.PV("EXP:Seq:State", callback=self._on_epics_state_change)
+                self.log("Subscribed to EPICS PV: EXP:Seq:State for auto-triggering.")
+            except Exception as e:
+                self.log(f"Failed to subscribe to EXP:Seq:State: {e}", "WARNING")
+
+    def _on_epics_state_change(self, pvname=None, value=None, **kwargs):
+        """Background callback from PyEpics, safely routed to Tkinter thread."""
+        if value is not None:
+            state_str = str(value)
+            self.after_idle(self._handle_auto_trigger, state_str)
+
+    def _handle_auto_trigger(self, new_state: str):
+        """Automatically send *TRG command when sequence state transitions to ACQUIRING."""
+        if new_state == "ACQUIRING" and self._last_epics_state != "ACQUIRING":
+            if self.dg and self.dg.is_connected():
+                try:
+                    self.dg.arm_single_shot()
+                    self.log("⚡ [EPICS AUTO-TRIGGER] Sequence entered 'ACQUIRING' -> Sent *TRG command!", "INFO")
+                    
+                    orig_bg = self.btn_single_shot.cget("bg")
+                    self.btn_single_shot.config(bg="#ff9800", text="⚡ AUTO-TRIGGERED (*TRG) ⚡")
+                    self.after(350, lambda: self.btn_single_shot.config(bg=orig_bg, text="⚡ SINGLE SHOT TRIGGER / ARM (*TRG) ⚡"))
+                except Exception as e:
+                    self.log(f"Failed to execute auto-trigger: {e}", "ERROR")
+            else:
+                self.log("Received ACQUIRING state, but RS-232 serial is not connected!", "WARNING")
+
+        self._last_epics_state = new_state
 
     def _check_epics_ioc_status(self):
         """Poll EPICS PVs to report IOC network status and hardware mode."""
@@ -494,6 +531,7 @@ class DG645App(tk.Tk):
                     text=f"✔ EPICS IOC: ONLINE | Status: {stat} | Mode: {mode} HARDWARE",
                     bg=bg_color
                 )
+                self._setup_epics_state_listener()
             else:
                 self.epics_ioc_label.config(
                     text="❌ EPICS IOC: DISCONNECTED",
@@ -504,7 +542,6 @@ class DG645App(tk.Tk):
                 text="❌ EPICS IOC: DISCONNECTED",
                 bg="#f44336"
             )
-        # Re-poll every 2 seconds
         self.after(2000, self._check_epics_ioc_status)
 
 
