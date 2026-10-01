@@ -1,0 +1,961 @@
+"""
+dual_gige_gui.py
+================
+PyQt6 / PySide6 GUI front-end for Single GigE Point Grey Grasshopper2 Camera (Cam 0).
+Refactored for strict local vs. EPICS DAQ workflow separation.
+
+Features:
+- Tab 1: Live View & Local Operations
+  - CW streaming toggle, single-shot grab, and local trigger control.
+  - Live background subtraction option for display viewports.
+  - Snapshot background recording directly using current frame memory.
+- Tab 2: EPICS DAQ Mode
+  - Hardware status banner & auto sequence handling.
+  - Separate raw shot & attached background persistence.
+- Tab 3: System & Event Log
+  - Real-time hardware status readbacks (Exposure, FPS, Gain, IP Address, Pixel Format).
+  - Rich-text System & DAQ Event Log console.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import time
+from typing import Optional
+
+import numpy as np
+import tifffile
+
+try:
+    from PyQt6 import QtCore, QtGui, QtWidgets
+    from PyQt6.QtCore import (
+        QMutex, QMutexLocker, QThread, QTimer, Qt, pyqtSignal as Signal, pyqtSlot as Slot
+    )
+    from PyQt6.QtWidgets import (
+        QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+        QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+        QPushButton, QTextEdit, QTabWidget, QVBoxLayout, QWidget,
+    )
+    _QT_BACKEND = "PyQt6"
+except ImportError:
+    from PySide6 import QtCore, QtGui, QtWidgets
+    from PySide6.QtCore import (
+        QMutex, QMutexLocker, QThread, QTimer, Qt, Signal, Slot
+    )
+    from PySide6.QtWidgets import (
+        QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+        QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+        QPushButton, QTextEdit, QTabWidget, QVBoxLayout, QWidget,
+    )
+    _QT_BACKEND = "PySide6"
+
+import pyqtgraph as pg
+
+from camera_analysis import fit_2d_gaussian, GaussianFitResult
+from ioc_gige_driver import DualGigECameraController
+
+logger = logging.getLogger(__name__)
+
+pg.setConfigOptions(
+    imageAxisOrder="row-major",
+    antialias=True,
+    useOpenGL=True,
+)
+
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_settings.json")
+
+_STYLE = """
+QMainWindow, QWidget {
+    background-color: #0f1117;
+    color: #e2e8f0;
+    font-family: "Segoe UI", "Inter", -apple-system, sans-serif;
+    font-size: 12px;
+}
+QGroupBox {
+    background-color: #171a23;
+    border: 1px solid #272d3d;
+    border-radius: 6px;
+    margin-top: 14px;
+    padding: 10px 8px 6px 8px;
+    font-weight: bold;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 8px;
+    padding: 0 4px;
+    color: #818cf8;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox {
+    background-color: #1e2230;
+    border: 1px solid #31384e;
+    border-radius: 4px;
+    padding: 4px 6px;
+    color: #f1f5f9;
+    font-size: 12px;
+}
+QLineEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus {
+    border: 1px solid #6366f1;
+}
+QPushButton {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4f46e5, stop:1 #4338ca);
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #6366f1, stop:1 #4f46e5);
+}
+QPushButton:pressed {
+    background: #3730a3;
+}
+QPushButton#singleShotBtn {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0891b2, stop:1 #0e7490);
+}
+QPushButton#singleShotBtn:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #06b6d4, stop:1 #0891b2);
+}
+QPushButton#recordBgBtn {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #059669, stop:1 #047857);
+}
+QPushButton#recordBgBtn:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #10b981, stop:1 #059669);
+}
+QPushButton#analyzeBtn {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #d97706, stop:1 #b45309);
+}
+QPushButton#analyzeBtn:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f59e0b, stop:1 #d97706);
+}
+QPushButton#saveBtn {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2563eb, stop:1 #1d4ed8);
+}
+QPushButton#saveBtn:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3b82f6, stop:1 #2563eb);
+}
+QPushButton#browseBtn {
+    background: #334155;
+    color: #f8fafc;
+    border: 1px solid #475569;
+}
+QPushButton#cwBtnRunning {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #059669, stop:1 #047857);
+    color: #ffffff;
+    font-weight: bold;
+}
+QPushButton#cwBtnStopped {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #dc2626, stop:1 #b91c1c);
+    color: #ffffff;
+    font-weight: bold;
+}
+QTabWidget::pane {
+    border: 1px solid #272d3d;
+    background-color: #0f1117;
+    border-radius: 6px;
+}
+QTabBar::tab {
+    background: #171a23;
+    color: #94a3b8;
+    border: 1px solid #272d3d;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 8px 22px;
+    margin-right: 4px;
+    font-weight: 600;
+}
+QTabBar::tab:selected {
+    background: #1e2230;
+    color: #38bdf8;
+    border-color: #38bdf8;
+}
+"""
+
+
+class CameraGrabberThread(QThread):
+    frame_ready = Signal(object)
+
+    def __init__(self, controller: DualGigECameraController):
+        super().__init__()
+        self.controller = controller
+        self._running = False
+        self._mutex = QMutex()
+
+    def run(self):
+        self._running = True
+        while True:
+            with QMutexLocker(self._mutex):
+                if not self._running:
+                    break
+            
+            try:
+                f0 = self.controller.grab_frame(0)
+                if f0 is not None:
+                    self.frame_ready.emit(f0)
+            except Exception as e:
+                logger.debug("Cam 0 frame grabber thread error: %s", e)
+            
+            time.sleep(0.01)
+
+    def stop(self):
+        with QMutexLocker(self._mutex):
+            self._running = False
+        self.wait(2000)
+
+
+class SingleGigECameraGUI(QMainWindow):
+    epics_state_changed = Signal(str)
+
+    def __init__(self, force_mock: bool = False):
+        super().__init__()
+        self.setWindowTitle("Point Grey GigE Camera Controller (Cam 0) - Diagnostic & DAQ System")
+        self.resize(1150, 850)
+        self.setStyleSheet(_STYLE)
+
+        self.is_cw_running = True
+        self.latest_frame: Optional[np.ndarray] = None
+        self.latest_fit: Optional[GaussianFitResult] = None
+
+        self._epics_state_pv = None
+        self._last_epics_state = None
+
+        self.controller = DualGigECameraController(
+            serial_0=0,
+            name_0="Cam_0",
+            force_mock=force_mock,
+        )
+
+        self._init_ui()
+        self._load_settings()
+        self._connect_camera()
+        self._setup_epics_listeners()
+
+        self.display_timer = QTimer(self)
+        self.display_timer.setInterval(100)
+        self.display_timer.timeout.connect(self._on_display_tick)
+
+        self.grabber_thread = CameraGrabberThread(self.controller)
+        self.grabber_thread.frame_ready.connect(self._on_frame_received)
+        self.grabber_thread.start()
+        self.display_timer.start()
+
+    def _init_ui(self):
+        central_widget = QWidget(self)
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+
+        self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+        self.tab_local = QWidget()
+        self._build_tab_local(self.tab_local)
+        self.tabs.addTab(self.tab_local, "🎥 Live View & Local Operations")
+
+        self.tab_epics = QWidget()
+        self._build_tab_epics(self.tab_epics)
+        self.tabs.addTab(self.tab_epics, "⚡ EPICS DAQ Mode")
+
+        self.tab_log = QWidget()
+        self._build_tab_log(self.tab_log)
+        self.tabs.addTab(self.tab_log, "📜 System & Event Log")
+
+        main_layout.addWidget(self.tabs)
+        self.statusBar().showMessage("System Ready | Camera 0 Active")
+
+    def _build_tab_local(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        ctrl_bar = QHBoxLayout()
+
+        self.btn_cw_toggle = QPushButton("Stop CW Acquisition")
+        self.btn_cw_toggle.setObjectName("cwBtnRunning")
+        self.btn_cw_toggle.clicked.connect(self._on_toggle_cw)
+        ctrl_bar.addWidget(self.btn_cw_toggle)
+
+        self.btn_single_shot = QPushButton("📸 Single Shot")
+        self.btn_single_shot.setObjectName("singleShotBtn")
+        self.btn_single_shot.setToolTip("Grab a single frame (useful when CW is stopped)")
+        self.btn_single_shot.clicked.connect(self._on_single_shot_click)
+        ctrl_bar.addWidget(self.btn_single_shot)
+
+        ctrl_bar.addSpacing(15)
+
+        ctrl_bar.addWidget(QLabel("Trigger Mode:"))
+        self.trigger_combo = QComboBox()
+        self.trigger_combo.addItems(["INTERNAL/OFF (Free-Run)", "EXTERNAL_TTL (Hardware Burst)"])
+        self.trigger_combo.currentIndexChanged.connect(self._on_local_trigger_changed)
+        ctrl_bar.addWidget(self.trigger_combo)
+
+        ctrl_bar.addStretch()
+
+        self.status_badge = QLabel("● LIVE (CW)")
+        self.status_badge.setStyleSheet("color: #10b981; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
+        ctrl_bar.addWidget(self.status_badge)
+
+        layout.addLayout(ctrl_bar)
+
+        self.gl_layout = pg.GraphicsLayoutWidget()
+        self.gl_layout.setBackground("#000000")
+        self.view = self.gl_layout.addViewBox(row=0, col=0, lockAspect=True, enableMouse=True)
+        self.view.invertY(True)
+
+        self.img_item = pg.ImageItem()
+        self.view.addItem(self.img_item)
+
+        self.hist_lut = pg.HistogramLUTItem(self.img_item)
+        self.hist_lut.gradient.loadPreset("inferno")
+        self.gl_layout.addItem(self.hist_lut, row=0, col=1)
+        self.hist_lut.setMaximumWidth(110)
+
+        layout.addWidget(self.gl_layout, stretch=1)
+
+        self.coord_label = QLabel("Cursor: (X: ----, Y: ----) | Intensity: ---- ADU")
+        self.coord_label.setStyleSheet("color: #38bdf8; font-family: monospace; font-size: 11px;")
+        layout.addWidget(self.coord_label)
+
+        self._init_graphics_overlays()
+
+        bottom_group = QGroupBox("Local Diagnostics & Independent File Saving")
+        b_layout = QVBoxLayout(bottom_group)
+
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("Exposure (ms):"))
+        self.exp_spin = QDoubleSpinBox()
+        self.exp_spin.setRange(0.1, 5000.0)
+        self.exp_spin.setValue(100.0)
+        self.exp_spin.setSingleStep(5.0)
+        self.exp_spin.valueChanged.connect(self._on_exposure_changed)
+        r1.addWidget(self.exp_spin)
+
+        r1.addWidget(QLabel("Gain (dB):"))
+        self.gain_spin = QDoubleSpinBox()
+        self.gain_spin.setRange(0.0, 24.0)
+        self.gain_spin.setValue(0.0)
+        self.gain_spin.setSingleStep(0.5)
+        self.gain_spin.valueChanged.connect(self._on_gain_changed)
+        r1.addWidget(self.gain_spin)
+
+        self.sub_bg_check = QCheckBox("Subtract BG on Display")
+        self.sub_bg_check.setChecked(True)
+        self.sub_bg_check.setToolTip("Subtract recorded background for live and DAQ viewports without altering raw stored data.")
+        r1.addWidget(self.sub_bg_check)
+
+        self.target_check = QCheckBox("Show Target Circle")
+        self.target_check.setChecked(True)
+        self.target_check.stateChanged.connect(self._on_target_toggle)
+        r1.addWidget(self.target_check)
+
+        self.roi_check = QCheckBox("Show ROI Box")
+        self.roi_check.setChecked(True)
+        self.roi_check.stateChanged.connect(self._on_roi_toggle)
+        r1.addWidget(self.roi_check)
+
+        self.bg_status_label = QLabel("BG: [None]")
+        self.bg_status_label.setStyleSheet("color: #f59e0b; font-weight: bold;")
+        r1.addWidget(self.bg_status_label)
+
+        b_layout.addLayout(r1)
+
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("Local Save Dir:"))
+        default_local_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_local")
+        self.local_dir_edit = QLineEdit(default_local_dir)
+        r2.addWidget(self.local_dir_edit, stretch=1)
+
+        btn_local_browse = QPushButton("Browse...")
+        btn_local_browse.setObjectName("browseBtn")
+        btn_local_browse.clicked.connect(self._on_browse_local_dir)
+        r2.addWidget(btn_local_browse)
+
+        r2.addWidget(QLabel("Prefix:"))
+        self.local_prefix_edit = QLineEdit("cam0_local")
+        self.local_prefix_edit.setMaximumWidth(120)
+        r2.addWidget(self.local_prefix_edit)
+
+        btn_record_bg = QPushButton("Record BG")
+        btn_record_bg.setObjectName("recordBgBtn")
+        btn_record_bg.clicked.connect(self._on_record_bg)
+        r2.addWidget(btn_record_bg)
+
+        btn_analyze = QPushButton("Analyze 2D Gaussian")
+        btn_analyze.setObjectName("analyzeBtn")
+        btn_analyze.clicked.connect(self._on_analyze)
+        r2.addWidget(btn_analyze)
+
+        btn_save_local = QPushButton("💾 Save Local Shot")
+        btn_save_local.setObjectName("saveBtn")
+        btn_save_local.clicked.connect(self._on_save_local_shot)
+        r2.addWidget(btn_save_local)
+
+        b_layout.addLayout(r2)
+
+        self.fit_result_label = QLabel("Fit: [Not Analyzed]")
+        self.fit_result_label.setStyleSheet("color: #a7f3d0; font-family: monospace; font-size: 11px;")
+        b_layout.addWidget(self.fit_result_label)
+
+        layout.addWidget(bottom_group)
+
+    def _init_graphics_overlays(self):
+        self.target_circle = pg.CircleROI([762, 562], [100, 100], pen=pg.mkPen("#38bdf8", width=1.5, style=Qt.PenStyle.DashLine))
+        self.target_circle.setZValue(10)
+        self.view.addItem(self.target_circle)
+
+        self.crosshair_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#38bdf8", width=1.0))
+        self.crosshair_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#38bdf8", width=1.0))
+        self.view.addItem(self.crosshair_v)
+        self.view.addItem(self.crosshair_h)
+        self.target_circle.sigRegionChanged.connect(self._update_crosshair_pos)
+
+        self.roi_box = pg.RectROI([612, 412], [400, 400], pen=pg.mkPen("#f59e0b", width=1.5))
+        self.roi_box.addScaleHandle([1, 1], [0, 0])
+        self.roi_box.addScaleHandle([0, 0], [1, 1])
+        self.roi_box.setZValue(9)
+        self.view.addItem(self.roi_box)
+
+        self.fit_marker = pg.ScatterPlotItem(size=12, pen=pg.mkPen("#ef4444", width=2), brush=pg.mkBrush("#ef4444"))
+        self.fit_marker.setZValue(12)
+        self.view.addItem(self.fit_marker)
+
+        self.proxy = pg.SignalProxy(self.gl_layout.scene().sigMouseMoved, rateLimit=30, slot=self._on_mouse_moved)
+
+    def _build_tab_epics(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        self.epics_banner_label = QLabel("EPICS IOC: DISCONNECTED | Mode: UNKNOWN")
+        self.epics_banner_label.setStyleSheet("background-color: #f44336; color: white; font-weight: bold; font-size: 14px; padding: 10px; border-radius: 6px;")
+        self.epics_banner_label.setAlignment(Qt.AlignmentFlag.AlignCenter if hasattr(Qt, "AlignmentFlag") else Qt.AlignCenter)
+        layout.addWidget(self.epics_banner_label)
+
+        pv_group = QGroupBox("EPICS Channel Access PV Status Readouts")
+        f_layout = QFormLayout(pv_group)
+
+        self.pv_state_label = QLabel("IDLE")
+        self.pv_state_label.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 14px;")
+        f_layout.addRow("Sequence State (EXP:Seq:State):", self.pv_state_label)
+
+        self.pv_cam_mode_label = QLabel("SIMULATED")
+        self.pv_cam_mode_label.setStyleSheet("color: #f59e0b; font-weight: bold;")
+        f_layout.addRow("Camera Mode (EXP:Seq:CameraMode):", self.pv_cam_mode_label)
+
+        self.pv_cam_status_label = QLabel("CONNECTED")
+        self.pv_cam_status_label.setStyleSheet("color: #10b981; font-weight: bold;")
+        f_layout.addRow("Camera Status (EXP:Seq:CameraStatus):", self.pv_cam_status_label)
+
+        self.pv_filename_label = QLabel("exp_run")
+        self.pv_filename_label.setStyleSheet("color: #f1f5f9; font-weight: bold;")
+        f_layout.addRow("Active Filename (EXP:Seq:FileName):", self.pv_filename_label)
+
+        self.pv_shot_label = QLabel("0")
+        self.pv_shot_label.setStyleSheet("color: #f1f5f9; font-weight: bold;")
+        f_layout.addRow("Current Shot # (EXP:Seq:ShotNumber):", self.pv_shot_label)
+
+        layout.addWidget(pv_group)
+
+        daq_group = QGroupBox("EPICS Automated Sequence Save Configuration")
+        daq_layout = QVBoxLayout(daq_group)
+
+        d_row = QHBoxLayout()
+        d_row.addWidget(QLabel("DAQ Auto-Save Dir:"))
+        default_daq_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data_epics")
+        self.daq_dir_edit = QLineEdit(default_daq_dir)
+        d_row.addWidget(self.daq_dir_edit, stretch=1)
+
+        btn_daq_browse = QPushButton("Browse...")
+        btn_daq_browse.setObjectName("browseBtn")
+        btn_daq_browse.clicked.connect(self._on_browse_daq_dir)
+        d_row.addWidget(btn_daq_browse)
+
+        daq_layout.addLayout(d_row)
+
+        info_lbl = QLabel("Note: In EPICS DAQ Mode, the camera is automatically locked to EXTERNAL_TTL trigger mode.\nFrames are captured upon DG645 pulse and saved automatically during SAVING state using EPICS PV metadata.")
+        info_lbl.setStyleSheet("color: #94a3b8; font-style: italic;")
+        daq_layout.addWidget(info_lbl)
+
+        layout.addWidget(daq_group)
+
+        daq_img_group = QGroupBox("EPICS DAQ Acquired Frame Viewport")
+        daq_img_layout = QVBoxLayout(daq_img_group)
+
+        self.daq_gl_layout = pg.GraphicsLayoutWidget()
+        self.daq_gl_layout.setBackground("#000000")
+        self.daq_view = self.daq_gl_layout.addViewBox(row=0, col=0, lockAspect=True, enableMouse=True)
+        self.daq_view.invertY(True)
+
+        self.daq_img_item = pg.ImageItem()
+        self.daq_view.addItem(self.daq_img_item)
+
+        self.daq_hist_lut = pg.HistogramLUTItem(self.daq_img_item)
+        self.daq_hist_lut.gradient.loadPreset("inferno")
+        self.daq_gl_layout.addItem(self.daq_hist_lut, row=0, col=1)
+        self.daq_hist_lut.setMaximumWidth(110)
+
+        daq_img_layout.addWidget(self.daq_gl_layout)
+        layout.addWidget(daq_img_group, stretch=1)
+
+    def _build_tab_log(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        hw_group = QGroupBox("Actual Camera Hardware Parameters (System Tab)")
+        hw_layout = QFormLayout(hw_group)
+
+        self.lbl_hw_ip = QLabel("0.0.0.0")
+        self.lbl_hw_ip.setStyleSheet("color: #38bdf8; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Camera IP Address:", self.lbl_hw_ip)
+
+        self.lbl_hw_exp = QLabel("0.00 ms")
+        self.lbl_hw_exp.setStyleSheet("color: #f1f5f9; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Actual Exposure Time:", self.lbl_hw_exp)
+
+        self.lbl_hw_fps = QLabel("0.00 FPS")
+        self.lbl_hw_fps.setStyleSheet("color: #f1f5f9; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Actual Frame Rate:", self.lbl_hw_fps)
+
+        self.lbl_hw_gain = QLabel("0.00 dB")
+        self.lbl_hw_gain.setStyleSheet("color: #f1f5f9; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Actual Gain:", self.lbl_hw_gain)
+
+        self.lbl_hw_fmt = QLabel("MONO16")
+        self.lbl_hw_fmt.setStyleSheet("color: #10b981; font-weight: bold; font-family: monospace;")
+        hw_layout.addRow("Pixel Format:", self.lbl_hw_fmt)
+
+        layout.addWidget(hw_group)
+
+        log_group = QGroupBox("System & DAQ Event Log (全系統日誌)")
+        log_layout = QVBoxLayout(log_group)
+
+        self.daq_log_edit = QTextEdit()
+        self.daq_log_edit.setReadOnly(True)
+        self.daq_log_edit.setStyleSheet("background-color: #1e1e1e; color: #dcdcdc; font-family: Consolas, monospace;")
+        log_layout.addWidget(self.daq_log_edit)
+
+        btn_clear_log = QPushButton("Clear Log")
+        btn_clear_log.setObjectName("browseBtn")
+        btn_clear_log.clicked.connect(self._clear_log)
+        log_layout.addWidget(
+            btn_clear_log,
+            alignment=Qt.AlignmentFlag.AlignRight if hasattr(Qt, "AlignmentFlag") else Qt.AlignRight
+        )
+
+        layout.addWidget(log_group, stretch=1)
+
+    def log(self, message: str, level: str = "INFO"):
+        timestamp = time.strftime("%H:%M:%S")
+        color_map = {
+            "INFO": "#dcdcdc",
+            "WARNING": "#f59e0b",
+            "ERROR": "#ef4444",
+            "SUCCESS": "#10b981",
+        }
+        color = color_map.get(level.upper(), "#dcdcdc")
+        formatted_msg = (
+            f'<span style="color: #888888;">[{timestamp}]</span> '
+            f'<b style="color: {color};">[{level.upper()}]</b> {message}'
+        )
+        self.daq_log_edit.append(formatted_msg)
+        self.daq_log_edit.moveCursor(QtGui.QTextCursor.MoveOperation.End if hasattr(QtGui, "QTextCursor") else QtGui.QTextCursor.End)
+
+    def _clear_log(self):
+        self.daq_log_edit.clear()
+        self.log("Event log cleared.")
+
+    def log_daq(self, message: str):
+        self.log(message, "INFO")
+
+    def _update_crosshair_pos(self):
+        pos = self.target_circle.pos()
+        size = self.target_circle.size()
+        cx = pos.x() + size.x() / 2.0
+        cy = pos.y() + size.y() / 2.0
+        self.crosshair_v.setPos(cx)
+        self.crosshair_h.setPos(cy)
+
+    def _on_mouse_moved(self, evt):
+        pos = evt[0]
+        if self.view.sceneBoundingRect().contains(pos):
+            mouse_pt = self.view.mapSceneToView(pos)
+            x, y = int(round(mouse_pt.x())), int(round(mouse_pt.y()))
+            if self.latest_frame is not None:
+                h, w = self.latest_frame.shape
+                if 0 <= x < w and 0 <= y < h:
+                    val = self.latest_frame[y, x]
+                    self.coord_label.setText(f"Cursor: (X: {x:4d}, Y: {y:4d}) | Intensity: {val:5d} ADU (Raw)")
+                    return
+        self.coord_label.setText("Cursor: (X: ----, Y: ----) | Intensity: ---- ADU")
+
+    def _on_tab_changed(self, index: int):
+        if index == 1:
+            self.trigger_combo.setCurrentIndex(1)
+            self.controller.set_trigger_mode("EXTERNAL_TTL")
+            self.statusBar().showMessage("Switched to EPICS DAQ Mode -> Locked to EXTERNAL_TTL Trigger")
+            self.log("Entered EPICS DAQ Mode: Enforced EXTERNAL_TTL trigger mode.", "INFO")
+
+    def _on_toggle_cw(self):
+        if self.is_cw_running:
+            self.controller.stop_capture_all()
+            self.is_cw_running = False
+            self.btn_cw_toggle.setText("Start CW Acquisition")
+            self.btn_cw_toggle.setObjectName("cwBtnStopped")
+            self.btn_cw_toggle.style().unpolish(self.btn_cw_toggle)
+            self.btn_cw_toggle.style().polish(self.btn_cw_toggle)
+            self.status_badge.setText("● PAUSED")
+            self.status_badge.setStyleSheet("color: #ef4444; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
+            self.log("CW Acquisition PAUSED.", "WARNING")
+        else:
+            self.controller.start_capture_all()
+            self.is_cw_running = True
+            self.btn_cw_toggle.setText("Stop CW Acquisition")
+            self.btn_cw_toggle.setObjectName("cwBtnRunning")
+            self.btn_cw_toggle.style().unpolish(self.btn_cw_toggle)
+            self.btn_cw_toggle.style().polish(self.btn_cw_toggle)
+            self.status_badge.setText("● LIVE (CW)")
+            self.status_badge.setStyleSheet("color: #10b981; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
+            self.log("CW Acquisition STARTED.", "SUCCESS")
+
+    def _get_display_frame(self, raw_frame: np.ndarray) -> np.ndarray:
+        """
+        計算用於 Viewport 繪製的背景相減影像。
+        保持 float32 帶符號浮點數，不進行 0 的下限裁切，以保留負數雜訊與數值波動。
+        """
+        raw_float = raw_frame.astype(np.float32)
+        
+        if not self.sub_bg_check.isChecked():
+            return raw_float
+
+        bg = self.controller.get_background(0)
+        if bg is None or bg.shape != raw_frame.shape:
+            return raw_float
+
+        # 直接進行 float32 相減，保留低於背景值的負數結果
+        subtracted = raw_float - bg.astype(np.float32)
+        return subtracted
+
+    def _on_single_shot_click(self):
+        if self.is_cw_running:
+            self._on_toggle_cw()
+            self.log("Single shot triggered: Automatically paused CW acquisition.", "INFO")
+
+        try:
+            driver_0 = self.controller.drivers[0] if getattr(self.controller, 'drivers', None) else None
+            was_capturing = getattr(driver_0, 'is_capturing', False) if driver_0 else False
+
+            if not was_capturing:
+                self.controller.start_capture_all()
+
+            frame = self.controller.grab_frame(0)
+
+            if not was_capturing:
+                self.controller.stop_capture_all()
+
+            if frame is not None:
+                self.latest_frame = frame
+                disp_frame = self._get_display_frame(frame)
+                self.img_item.setImage(disp_frame, autoLevels=False)
+                self.status_badge.setText("● SINGLE SHOT")
+                self.status_badge.setStyleSheet("color: #38bdf8; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
+                self.statusBar().showMessage("📸 Single shot grabbed successfully (CW Paused).")
+                self.log("📸 Single shot frame captured and rendered.", "SUCCESS")
+            else:
+                self.log("Single shot failed: Cam 0 Driver returned empty frame.", "ERROR")
+                QMessageBox.warning(self, "Single Shot", "Failed to grab single frame from Camera 0.")
+        except Exception as e:
+            self.log(f"Single shot exception: {e}", "ERROR")
+            QMessageBox.critical(self, "Single Shot Error", str(e))
+
+    def _on_local_trigger_changed(self, idx: int):
+        mode = "EXTERNAL_TTL" if idx == 1 else "INTERNAL/OFF"
+        self.controller.set_trigger_mode(mode)
+        self.statusBar().showMessage(f"Local Trigger mode set to: {mode}")
+        self.log(f"Local Trigger mode changed to: {mode}", "INFO")
+
+    def _on_exposure_changed(self, val_ms: float):
+        self.controller.set_exposure_time(0, val_ms / 1000.0)
+
+    def _on_gain_changed(self, val_db: float):
+        self.controller.set_gain(0, val_db)
+
+    def _on_target_toggle(self, state: int):
+        visible = bool(state)
+        self.target_circle.setVisible(visible)
+        self.crosshair_v.setVisible(visible)
+        self.crosshair_h.setVisible(visible)
+
+    def _on_roi_toggle(self, state: int):
+        self.roi_box.setVisible(bool(state))
+
+    def _on_record_bg(self):
+        """Record background using current display frame snapshot."""
+        if self.latest_frame is None:
+            self.log("Record BG failed: No frame available in memory.", "WARNING")
+            QMessageBox.warning(self, "Background", "No frame available to set as background.")
+            return
+
+        try:
+            bg_snapshot = self.latest_frame.copy()
+            self.controller.set_background(0, bg_snapshot)
+            mean_bg = float(np.mean(bg_snapshot))
+            self.bg_status_label.setText(f"BG: [Mean {mean_bg:.1f}]")
+            self.bg_status_label.setStyleSheet("color: #10b981; font-weight: bold;")
+            self.log(f"Background recorded from active snapshot. Mean intensity: {mean_bg:.1f} ADU", "SUCCESS")
+            QMessageBox.information(self, "Background Recorded", f"Current frame set as background.\nMean: {mean_bg:.1f} ADU")
+        except Exception as e:
+            self.log(f"Background setting failed: {e}", "ERROR")
+            QMessageBox.critical(self, "Background Error", str(e))
+
+    def _on_analyze(self):
+        if self.latest_frame is None:
+            self.log("Gaussian Analysis aborted: No image frame available.", "WARNING")
+            QMessageBox.warning(self, "Analyze", "No image frame available.")
+            return
+
+        pos = self.roi_box.pos()
+        size = self.roi_box.size()
+        x_min, y_min = int(pos.x()), int(pos.y())
+        x_max, y_max = int(pos.x() + size.x()), int(pos.y() + size.y())
+
+        fit = fit_2d_gaussian(self.latest_frame, roi_coords=(x_min, y_min, x_max, y_max))
+        self.latest_fit = fit
+
+        if fit.success:
+            res_str = (
+                f"Beam Center: ({fit.global_x0:.1f}, {fit.global_y0:.1f}) px | "
+                f"FWHM (X/Y): ({fit.fwhm_x:.1f}, {fit.fwhm_y:.1f}) px | "
+                f"RMSE: {fit.residual_rmse:.1f} ADU"
+            )
+            self.fit_result_label.setText(res_str)
+            self.fit_marker.setData([{"pos": (fit.global_x0, fit.global_y0)}])
+            self.log(f"Gaussian Fit Success -> {res_str}", "SUCCESS")
+        else:
+            self.fit_result_label.setText(f"Fit failed: {fit.message}")
+            self.fit_marker.clear()
+            self.log(f"Gaussian Fit Failed: {fit.message}", "WARNING")
+
+    def _on_browse_local_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Select Local Save Directory", self.local_dir_edit.text())
+        if d:
+            self.local_dir_edit.setText(d)
+
+    def _on_browse_daq_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Select DAQ Save Directory", self.daq_dir_edit.text())
+        if d:
+            self.daq_dir_edit.setText(d)
+
+    def _on_save_local_shot(self):
+        if self.latest_frame is None:
+            self.log("Local Save aborted: No frame in memory.", "WARNING")
+            QMessageBox.warning(self, "Save Local", "No frame available.")
+            return
+
+        target_dir = self.local_dir_edit.text().strip()
+        os.makedirs(target_dir, exist_ok=True)
+
+        prefix = self.local_prefix_edit.text().strip() or "cam0_local"
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"{prefix}_{timestamp}.tif"
+        filepath = os.path.join(target_dir, filename)
+
+        try:
+            extra = {}
+            if self.latest_fit and self.latest_fit.success:
+                extra["analysis"] = {
+                    "center_x": self.latest_fit.global_x0,
+                    "center_y": self.latest_fit.global_y0,
+                    "fwhm_x": self.latest_fit.fwhm_x,
+                    "fwhm_y": self.latest_fit.fwhm_y,
+                }
+            self.controller.save_tiff_with_metadata(
+                filepath=filepath,
+                index=0,
+                image_data=self.latest_frame,
+                extra_metadata=extra,
+            )
+            self.log(f"💾 Local image saved successfully: {filepath}", "SUCCESS")
+            QMessageBox.information(self, "Saved Locally", f"Saved image to:\n{filepath}")
+        except Exception as e:
+            self.log(f"Local save failed: {e}", "ERROR")
+            QMessageBox.critical(self, "Save Error", str(e))
+
+    def _connect_camera(self):
+        c0, _ = self.controller.connect_all()
+        self.controller.start_capture_all()
+
+        try:
+            import epics
+            is_real = c0 and (not self.controller.is_mock)
+            mode_str = "REAL" if is_real else "SIMULATED"
+            stat_str = "CONNECTED" if c0 else "DISCONNECTED"
+
+            epics.caput("EXP:Seq:CameraMode", mode_str)
+            epics.caput("EXP:Seq:CameraStatus", stat_str)
+
+            self.pv_cam_mode_label.setText(mode_str)
+            self.pv_cam_status_label.setText(stat_str)
+
+            bg_col = "#2e7d32" if is_real else "#e65100"
+            self.epics_banner_label.setText(f"✔ EPICS IOC: ONLINE | Status: {stat_str} | Mode: {mode_str} HARDWARE")
+            self.epics_banner_label.setStyleSheet(f"background-color: {bg_col}; color: white; font-weight: bold; font-size: 14px; padding: 10px; border-radius: 6px;")
+
+            self.log(
+                f"Cam 0 Hardware Status -> Connected: {c0}, Driver Mock: {self.controller.is_mock}",
+                "SUCCESS" if is_real else "WARNING"
+            )
+            self.log(f"Published EPICS PVs -> EXP:Seq:CameraMode='{mode_str}', EXP:Seq:CameraStatus='{stat_str}'", "INFO")
+        except Exception as e:
+            self.log(f"Could not publish camera status to EPICS: {e}", "ERROR")
+
+    def _setup_epics_listeners(self):
+        try:
+            import epics
+            self.epics_state_changed.connect(self._handle_epics_auto_sequence)
+            self._epics_state_pv = epics.PV("EXP:Seq:State", callback=self._on_epics_state_change)
+            self.log("Subscribed to EPICS PV: EXP:Seq:State", "INFO")
+        except Exception as e:
+            self.log(f"Failed to subscribe to EPICS state PV: {e}", "WARNING")
+
+    def _on_epics_state_change(self, pvname=None, value=None, **kwargs):
+        if value is not None:
+            state_str = str(value)
+            self.epics_state_changed.emit(state_str)
+
+    def _handle_epics_auto_sequence(self, new_state: str):
+        self.pv_state_label.setText(new_state)
+
+        try:
+            import epics
+            fn_val = epics.caget("EXP:Seq:FileName", as_string=True)
+            sn_val = epics.caget("EXP:Seq:ShotNumber")
+
+            fn = fn_val if fn_val is not None else "exp_run"
+            sn = sn_val if sn_val is not None else 0
+
+            self.pv_filename_label.setText(str(fn))
+            self.pv_shot_label.setText(str(sn))
+        except Exception as e:
+            fn, sn = "exp_run", 0
+            self.log(f"Failed reading EPICS PVs: {e}", "WARNING")
+
+        if new_state == self._last_epics_state:
+            return
+
+        self.log(f"EPICS State Transition: {self._last_epics_state} -> {new_state}", "INFO")
+
+        if new_state == "ARMED":
+            self.controller.set_trigger_mode("EXTERNAL_TTL")
+            self.controller.start_capture_all()
+            self.log("⚡ [ARMED] Locked to EXTERNAL_TTL & armed Cam 0 capture buffer.", "SUCCESS")
+
+        elif new_state == "ACQUIRING":
+            self.controller.start_capture_all()
+            self.log("⚡ [ACQUIRING] Cam 0 buffer active, waiting for DG645 TTL trigger pulse...", "INFO")
+
+        elif new_state == "SAVING":
+            try:
+                target_dir = self.daq_dir_edit.text().strip()
+                os.makedirs(target_dir, exist_ok=True)
+
+                filename = f"{fn}_shot_{int(sn):04d}.tif"
+                filepath = os.path.join(target_dir, filename)
+
+                if self.latest_frame is not None:
+                    self.controller.save_tiff_with_metadata(
+                        filepath=filepath,
+                        index=0,
+                        image_data=self.latest_frame,
+                    )
+
+                    disp_frame = self._get_display_frame(self.latest_frame)
+                    self.daq_img_item.setImage(disp_frame, autoLevels=False)
+                    self.log(f"💾 [SAVING AUTO-SAVE] Saved DAQ raw frame & background: {filepath}", "SUCCESS")
+                else:
+                    self.log("❌ [SAVING ERROR] No image frame in buffer to save!", "ERROR")
+            except Exception as e:
+                self.log(f"❌ [SAVING ERROR] Failed auto-saving camera image: {e}", "ERROR")
+
+        self._last_epics_state = new_state
+
+    @Slot(object)
+    def _on_frame_received(self, frame):
+        if frame is not None:
+            self.latest_frame = frame
+
+    def _on_display_tick(self):
+        hw_info = self.controller.get_actual_status(0)
+        self.lbl_hw_ip.setText(str(hw_info.get("ip_address", "N/A")))
+        self.lbl_hw_exp.setText(f"{hw_info.get('exposure_ms', 0.0):.2f} ms")
+        self.lbl_hw_fps.setText(f"{hw_info.get('frame_rate_fps', 0.0):.2f} FPS")
+        self.lbl_hw_gain.setText(f"{hw_info.get('gain_db', 0.0):.2f} dB")
+        self.lbl_hw_fmt.setText(str(hw_info.get("pixel_format", "N/A")))
+
+        if not self.is_cw_running:
+            return
+
+        if self.latest_frame is not None:
+            disp_frame = self._get_display_frame(self.latest_frame)
+            self.img_item.setImage(disp_frame, autoLevels=False)
+
+    def _load_settings(self):
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                if "exposure_ms" in cfg:
+                    self.exp_spin.setValue(float(cfg["exposure_ms"]))
+                if "gain_db" in cfg:
+                    self.gain_spin.setValue(float(cfg["gain_db"]))
+                if "local_save_dir" in cfg:
+                    self.local_dir_edit.setText(cfg["local_save_dir"])
+                if "daq_save_dir" in cfg:
+                    self.daq_dir_edit.setText(cfg["daq_save_dir"])
+            except Exception as e:
+                logger.warning("Could not load settings: %s", e)
+
+    def _save_settings(self):
+        try:
+            cfg = {
+                "exposure_ms": self.exp_spin.value(),
+                "gain_db": self.gain_spin.value(),
+                "local_save_dir": self.local_dir_edit.text().strip(),
+                "daq_save_dir": self.daq_dir_edit.text().strip(),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception as e:
+            logger.error("Could not save settings: %s", e)
+
+    def closeEvent(self, event):
+        self.display_timer.stop()
+        self.grabber_thread.stop()
+        self._save_settings()
+        self.controller.stop_capture_all()
+        self.controller.disconnect_all()
+        event.accept()
+
+
+DualGigECameraGUI = SingleGigECameraGUI
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    app = QApplication(sys.argv)
+    window = SingleGigECameraGUI()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

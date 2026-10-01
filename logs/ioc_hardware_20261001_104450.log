@@ -1,0 +1,3 @@
+2026-10-01 10:44:50.020 [INFO] [IOC_Hardware] Starting EPICS Hardware IOC Server with Dual Logging...
+2026-10-01 10:44:50.020 [INFO] [IOC_Hardware] Log file destination: logs\ioc_hardware_20261001_104450.log
+2026-10-01 10:45:30.959 [INFO] [IOC_Hardware] IOC Server shutting down gracefully. Log saved to: logs\ioc_hardware_20261001_104450.log
