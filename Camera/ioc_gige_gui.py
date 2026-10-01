@@ -627,15 +627,21 @@ class SingleGigECameraGUI(QMainWindow):
             self.log("CW Acquisition STARTED.", "SUCCESS")
 
     def _get_display_frame(self, raw_frame: np.ndarray) -> np.ndarray:
-        """Compute background-subtracted frame for viewport rendering."""
+        """
+        計算用於 Viewport 繪製的背景相減影像。
+        保持 float32 帶符號浮點數，不進行 0 的下限裁切，以保留負數雜訊與數值波動。
+        """
+        raw_float = raw_frame.astype(np.float32)
+        
         if not self.sub_bg_check.isChecked():
-            return raw_frame
+            return raw_float
 
         bg = self.controller.get_background(0)
         if bg is None or bg.shape != raw_frame.shape:
-            return raw_frame
+            return raw_float
 
-        subtracted = np.clip(raw_frame.astype(np.float32) - bg.astype(np.float32), 0, 65535).astype(np.uint16)
+        # 直接進行 float32 相減，保留低於背景值的負數結果
+        subtracted = raw_float - bg.astype(np.float32)
         return subtracted
 
     def _on_single_shot_click(self):
