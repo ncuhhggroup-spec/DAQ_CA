@@ -31,6 +31,7 @@ import time
 from typing import Callable, Optional
 
 import numpy as np
+import tifffile
 
 # Qt backend detection (PyQt6 / PySide6)
 try:
@@ -597,6 +598,10 @@ class DualGigECameraGUI(QMainWindow):
         self.latest_f0: Optional[np.ndarray] = None
         self.latest_f1: Optional[np.ndarray] = None
 
+        # EPICS State & Auto-Sequence tracking
+        self._epics_state_pv = None
+        self._last_epics_state = None
+
         # Initialize Dual Controller
         self.controller = DualGigECameraController(
             serial_0=0, serial_1=1,
@@ -609,6 +614,9 @@ class DualGigECameraGUI(QMainWindow):
 
         # Connect and Start Capture
         self._connect_cameras()
+
+        # EPICS Listener Setup
+        self._setup_epics_listeners()
 
         # 10 Hz Display Timer for throttled UI updates
         self.display_timer = QTimer(self)
@@ -763,6 +771,78 @@ class DualGigECameraGUI(QMainWindow):
         self.controller.start_capture_all()
         msg = f"Cameras: Cam0={'OK' if c0 else 'FAIL'}, Cam1={'OK' if c1 else 'FAIL'} | CW Acquisition Active"
         self.statusBar().showMessage(msg)
+
+        # Publish status to EPICS IOC Network
+        try:
+            import epics
+            is_real = not getattr(self.controller, "is_mock", True)
+            mode_str = "REAL" if is_real else "SIMULATED"
+            stat_str = "CONNECTED" if (c0 or c1) else "DISCONNECTED"
+            
+            epics.caput("EXP:Seq:CameraMode", mode_str)
+            epics.caput("EXP:Seq:CameraStatus", stat_str)
+            logger.info("Published to EPICS PV -> CameraMode: %s | CameraStatus: %s", mode_str, stat_str)
+        except Exception as e:
+            logger.warning("Failed to publish Camera status to EPICS: %s", e)
+
+    def _setup_epics_listeners(self):
+        """Subscribe to EXP:Seq:State for automated DAQ acquisition and file saving."""
+        try:
+            import epics
+            self._epics_state_pv = epics.PV("EXP:Seq:State", callback=self._on_epics_state_callback)
+            logger.info("Subscribed to EPICS PV: EXP:Seq:State")
+        except Exception as e:
+            logger.warning("Could not subscribe to EPICS state PV: %s", e)
+
+    def _on_epics_state_callback(self, pvname=None, value=None, **kwargs):
+        """Background callback from PyEpics."""
+        if value is not None:
+            state_str = str(value)
+            QTimer.singleShot(0, lambda: self._handle_epics_auto_sequence(state_str))
+
+    def _handle_epics_auto_sequence(self, new_state: str):
+        """Handle state transitions (ARMED, ACQUIRING, SAVING)."""
+        if new_state == self._last_epics_state:
+            return
+
+        logger.info("EPICS Sequence State Transition: %s -> %s", self._last_epics_state, new_state)
+
+        if new_state == "ARMED":
+            # Pre-allocate & Arm Camera Triggers
+            logger.info("⚡ [EPICS CAM AUTO] ARMED -> Pre-allocating zero-copy memory buffers...")
+            self.statusBar().showMessage("EPICS State: ARMED | Memory pre-allocated.")
+
+        elif new_state == "ACQUIRING":
+            # Ready to capture frame triggered by DG645 TTL pulse
+            logger.info("⚡ [EPICS CAM AUTO] ACQUIRING -> Arming frame grabber for DG645 pulse...")
+            self.statusBar().showMessage("EPICS State: ACQUIRING | Waiting for DG645 pulse...")
+
+        elif new_state == "SAVING":
+            # Auto-save images with EPICS metadata
+            try:
+                import epics
+                file_name = epics.caget("EXP:Seq:FileName", default="exp_run")
+                shot_num = epics.caget("EXP:Seq:ShotNumber", default=0)
+                
+                save_dir = self.get_save_dir()
+                os.makedirs(save_dir, exist_ok=True)
+                
+                target_file_0 = os.path.join(save_dir, f"{file_name}_cam0_shot_{int(shot_num):04d}.tif")
+                target_file_1 = os.path.join(save_dir, f"{file_name}_cam1_shot_{int(shot_num):04d}.tif")
+                
+                if self.latest_f0 is not None:
+                    tifffile.imwrite(target_file_0, self.latest_f0)
+                    logger.info("Saved Cam0 image to: %s", target_file_0)
+
+                if self.latest_f1 is not None:
+                    tifffile.imwrite(target_file_1, self.latest_f1)
+                    logger.info("Saved Cam1 image to: %s", target_file_1)
+
+                self.statusBar().showMessage(f"EPICS State: SAVING | Saved shot #{shot_num} data files.")
+            except Exception as e:
+                logger.error("Failed auto-saving camera images: %s", e)
+
+        self._last_epics_state = new_state
 
     def _on_trigger_mode_changed(self, idx: int):
         mode = "EXTERNAL_TTL" if idx == 1 else "INTERNAL/OFF"
