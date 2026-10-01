@@ -7,15 +7,16 @@ Refactored for strict local vs. EPICS DAQ workflow separation.
 Key Features:
 - Tab 1: Live View & Local Operations
   - CW (Continuous Wave) 10 Hz streaming toggle.
-  - Dedicated "📸 Single Shot" button for single-frame acquisition when CW is stopped.
+  - Dedicated "📸 Single Shot" button that automatically pauses CW acquisition.
   - Manual Trigger Mode switch (Internal Free-Run vs. External Hardware TTL).
   - Independent Local Free Saving (directory & file prefix, isolated from EPICS).
   - Real-time 2D Gaussian beam analysis, ROI, target crosshair, and background subtraction.
 - Tab 2: EPICS DAQ Mode
   - Automatic forced switch to External Hardware Trigger mode upon entering DAQ mode.
-  - EPICS IOC Network & Hardware Mode Status Banner (REAL vs SIMULATED).
+  - EPICS IOC Network & Hardware Mode Status Banner with precise Cam 0 mock detection (REAL vs SIMULATED).
   - Live readouts for Sequence State, Shot Counter, and Active DAQ Filename.
   - Automated background frame saving on SAVING state using EPICS PV metadata.
+  - Rich-text System & DAQ Event Log console.
 """
 
 from __future__ import annotations
@@ -220,10 +221,12 @@ class CameraGrabberThread(QThread):
 
 
 class SingleGigECameraGUI(QMainWindow):
-    """Main Application Window for Cam 0 with decoupled Local Free Saving vs EPICS DAQ Mode."""
+    # 跨線程 EPICS 狀態變更信號
+    epics_state_changed = Signal(str)
 
     def __init__(self, force_mock: bool = False):
         super().__init__()
+        # ... 原有內容 ...
         self.setWindowTitle("Point Grey GigE Camera Controller (Cam 0) - Diagnostic & DAQ System")
         self.resize(1150, 850)
         self.setStyleSheet(_STYLE)
@@ -519,8 +522,8 @@ class SingleGigECameraGUI(QMainWindow):
 
         layout.addWidget(daq_group)
 
-        # EPICS Log Window
-        log_group = QGroupBox("EPICS DAQ Event Log")
+        # System & DAQ Log Window
+        log_group = QGroupBox("System & DAQ Event Log (全系統日誌)")
         log_layout = QVBoxLayout(log_group)
 
         self.daq_log_edit = QTextEdit()
@@ -528,15 +531,42 @@ class SingleGigECameraGUI(QMainWindow):
         self.daq_log_edit.setStyleSheet("background-color: #1e1e1e; color: #dcdcdc; font-family: Consolas, monospace;")
         log_layout.addWidget(self.daq_log_edit)
 
+        btn_clear_log = QPushButton("Clear Log")
+        btn_clear_log.setObjectName("browseBtn")
+        btn_clear_log.clicked.connect(self._clear_log)
+        log_layout.addWidget(btn_clear_log, alignment=Qt.AlignmentFlag.AlignRight if hasattr(Qt, "AlignmentFlag") else Qt.AlignRight)
+
         layout.addWidget(log_group, stretch=1)
 
     # -------------------------------------------------------------------------
-    # Helper & Event Handlers
+    # System Event Logger & Helper Methods
     # -------------------------------------------------------------------------
 
-    def log_daq(self, message: str):
+    def log(self, message: str, level: str = "INFO"):
+        """System-wide colored event logger supporting HTML rich-text formatting."""
         timestamp = time.strftime("%H:%M:%S")
-        self.daq_log_edit.append(f"[{timestamp}] {message}")
+        color_map = {
+            "INFO": "#dcdcdc",
+            "WARNING": "#f59e0b",
+            "ERROR": "#ef4444",
+            "SUCCESS": "#10b981",
+        }
+        color = color_map.get(level.upper(), "#dcdcdc")
+        formatted_msg = (
+            f'<span style="color: #888888;">[{timestamp}]</span> '
+            f'<b style="color: {color};">[{level.upper()}]</b> {message}'
+        )
+        self.daq_log_edit.append(formatted_msg)
+        self.daq_log_edit.moveCursor(QtGui.QTextCursor.MoveOperation.End if hasattr(QtGui, "QTextCursor") else QtGui.QTextCursor.End)
+
+    def _clear_log(self):
+        """Clear event log console."""
+        self.daq_log_edit.clear()
+        self.log("Event log cleared.")
+
+    def log_daq(self, message: str):
+        """Backward compatibility alias for log()."""
+        self.log(message, "INFO")
 
     def _update_crosshair_pos(self):
         pos = self.target_circle.pos()
@@ -565,7 +595,7 @@ class SingleGigECameraGUI(QMainWindow):
             self.trigger_combo.setCurrentIndex(1)  # Force EXTERNAL_TTL
             self.controller.set_trigger_mode("EXTERNAL_TTL")
             self.statusBar().showMessage("Switched to EPICS DAQ Mode -> Locked to EXTERNAL_TTL Trigger")
-            self.log_daq("Entered EPICS DAQ Mode: Enforced EXTERNAL_TTL trigger mode.")
+            self.log("Entered EPICS DAQ Mode: Enforced EXTERNAL_TTL trigger mode.", "INFO")
 
     def _on_toggle_cw(self):
         if self.is_cw_running:
@@ -577,6 +607,7 @@ class SingleGigECameraGUI(QMainWindow):
             self.btn_cw_toggle.style().polish(self.btn_cw_toggle)
             self.status_badge.setText("● PAUSED")
             self.status_badge.setStyleSheet("color: #ef4444; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
+            self.log("CW Acquisition PAUSED.", "WARNING")
         else:
             self.controller.start_capture_all()
             self.is_cw_running = True
@@ -586,26 +617,23 @@ class SingleGigECameraGUI(QMainWindow):
             self.btn_cw_toggle.style().polish(self.btn_cw_toggle)
             self.status_badge.setText("● LIVE (CW)")
             self.status_badge.setStyleSheet("color: #10b981; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
+            self.log("CW Acquisition STARTED.", "SUCCESS")
 
     def _on_single_shot_click(self):
         """Grab a single frame directly; automatically stops CW stream if running."""
-        # 1. 若 CW 串流正在執行，自動切換停止 CW 狀態
         if self.is_cw_running:
             self._on_toggle_cw()
-            self.log_daq("Single shot triggered: Automatically paused CW acquisition.")
+            self.log("Single shot triggered: Automatically paused CW acquisition.", "INFO")
 
-        # 2. 確保相機 SDK 處於可擷取狀態並讀取單張 Frame
         try:
-            driver = self.controller.drivers[0]
-            was_capturing = getattr(driver, 'is_capturing', False)
+            driver = self.controller.drivers[0] if getattr(self.controller, 'drivers', None) else None
+            was_capturing = getattr(driver, 'is_capturing', False) if driver else False
 
-            # 若底層串流未啟動，暫時開啟以擷取單張畫面
             if not was_capturing:
                 self.controller.start_capture_all()
 
             frame = self.controller.grab_frame(0)
 
-            # 若原本為停止狀態，抓完後關閉底層串流
             if not was_capturing:
                 self.controller.stop_capture_all()
 
@@ -613,19 +641,21 @@ class SingleGigECameraGUI(QMainWindow):
                 self.latest_frame = frame
                 self.img_item.setImage(frame, autoLevels=False)
                 self.status_badge.setText("● SINGLE SHOT")
-                self.status_badge.setStyleSheet(
-                    "color: #38bdf8; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;"
-                )
+                self.status_badge.setStyleSheet("color: #38bdf8; font-weight: bold; padding: 2px 8px; background: #171a23; border-radius: 4px;")
                 self.statusBar().showMessage("📸 Single shot grabbed successfully (CW Paused).")
+                self.log("📸 Single shot frame captured and rendered.", "SUCCESS")
             else:
+                self.log("Single shot failed: Driver returned empty frame.", "ERROR")
                 QMessageBox.warning(self, "Single Shot", "Failed to grab single frame from Camera 0.")
         except Exception as e:
+            self.log(f"Single shot exception: {e}", "ERROR")
             QMessageBox.critical(self, "Single Shot Error", str(e))
 
     def _on_local_trigger_changed(self, idx: int):
         mode = "EXTERNAL_TTL" if idx == 1 else "INTERNAL/OFF"
         self.controller.set_trigger_mode(mode)
         self.statusBar().showMessage(f"Local Trigger mode set to: {mode}")
+        self.log(f"Local Trigger mode changed to: {mode}", "INFO")
 
     def _on_exposure_changed(self, val_ms: float):
         self.controller.set_exposure_time(0, val_ms / 1000.0)
@@ -648,12 +678,15 @@ class SingleGigECameraGUI(QMainWindow):
             mean_bg = float(np.mean(bg))
             self.bg_status_label.setText(f"BG: [Mean {mean_bg:.1f}]")
             self.bg_status_label.setStyleSheet("color: #10b981; font-weight: bold;")
+            self.log(f"Background recorded (3 averages). Mean intensity: {mean_bg:.1f} ADU", "SUCCESS")
             QMessageBox.information(self, "Background", f"Cam 0 Background recorded.\nMean: {mean_bg:.1f} ADU")
         except Exception as e:
+            self.log(f"Background recording failed: {e}", "ERROR")
             QMessageBox.critical(self, "Background Error", str(e))
 
     def _on_analyze(self):
         if self.latest_frame is None:
+            self.log("Gaussian Analysis aborted: No image frame available.", "WARNING")
             QMessageBox.warning(self, "Analyze", "No image frame available.")
             return
 
@@ -666,15 +699,18 @@ class SingleGigECameraGUI(QMainWindow):
         self.latest_fit = fit
 
         if fit.success:
-            self.fit_result_label.setText(
+            res_str = (
                 f"Beam Center: ({fit.global_x0:.1f}, {fit.global_y0:.1f}) px | "
                 f"FWHM (X/Y): ({fit.fwhm_x:.1f}, {fit.fwhm_y:.1f}) px | "
                 f"RMSE: {fit.residual_rmse:.1f} ADU"
             )
+            self.fit_result_label.setText(res_str)
             self.fit_marker.setData([{"pos": (fit.global_x0, fit.global_y0)}])
+            self.log(f"Gaussian Fit Success -> {res_str}", "SUCCESS")
         else:
             self.fit_result_label.setText(f"Fit failed: {fit.message}")
             self.fit_marker.clear()
+            self.log(f"Gaussian Fit Failed: {fit.message}", "WARNING")
 
     def _on_browse_local_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Select Local Save Directory", self.local_dir_edit.text())
@@ -689,6 +725,7 @@ class SingleGigECameraGUI(QMainWindow):
     def _on_save_local_shot(self):
         """Save shot locally without affecting or reading EPICS PVs."""
         if self.latest_frame is None:
+            self.log("Local Save aborted: No frame in memory.", "WARNING")
             QMessageBox.warning(self, "Save Local", "No frame available.")
             return
 
@@ -715,8 +752,10 @@ class SingleGigECameraGUI(QMainWindow):
                 image_data=self.latest_frame,
                 extra_metadata=extra,
             )
+            self.log(f"💾 Local image saved successfully: {filepath}", "SUCCESS")
             QMessageBox.information(self, "Saved Locally", f"Saved image to:\n{filepath}")
         except Exception as e:
+            self.log(f"Local save failed: {e}", "ERROR")
             QMessageBox.critical(self, "Save Error", str(e))
 
     # -------------------------------------------------------------------------
@@ -724,73 +763,93 @@ class SingleGigECameraGUI(QMainWindow):
     # -------------------------------------------------------------------------
 
     def _connect_camera(self):
+        """Connect to camera 0 and accurately inspect Cam 0 driver mock status."""
         c0, _ = self.controller.connect_all()
         self.controller.start_capture_all()
 
         try:
             import epics
-            is_real = not getattr(self.controller, "is_mock", True)
+            # 專門讀取 Cam 0 (drivers[0]) 的 is_mock 屬性，忽略被停用的 Cam 1
+            driver_0 = self.controller.drivers[0] if getattr(self.controller, 'drivers', None) else None
+            is_mock_0 = getattr(driver_0, 'is_mock', True) if driver_0 else getattr(self.controller, 'is_mock', True)
+
+            # 只要 Cam 0 成功連線且不是 Mock，即判定為 REAL 實體硬體模式
+            is_real = c0 and (not is_mock_0)
             mode_str = "REAL" if is_real else "SIMULATED"
             stat_str = "CONNECTED" if c0 else "DISCONNECTED"
 
+            # 發送正確的實體狀態給 EPICS IOC Server
             epics.caput("EXP:Seq:CameraMode", mode_str)
             epics.caput("EXP:Seq:CameraStatus", stat_str)
 
             self.pv_cam_mode_label.setText(mode_str)
             self.pv_cam_status_label.setText(stat_str)
 
-            bg_col = "#2e7d32" if mode_str == "REAL" else "#e65100"
+            bg_col = "#2e7d32" if is_real else "#e65100"
             self.epics_banner_label.setText(f"✔ EPICS IOC: ONLINE | Status: {stat_str} | Mode: {mode_str} HARDWARE")
             self.epics_banner_label.setStyleSheet(f"background-color: {bg_col}; color: white; font-weight: bold; font-size: 14px; padding: 10px; border-radius: 6px;")
+
+            self.log(
+                f"Cam 0 (S/N: 17360853) Connection -> Connected: {c0}, Mock Status: {is_mock_0}",
+                "SUCCESS" if is_real else "WARNING"
+            )
+            self.log(f"Published EPICS PVs -> EXP:Seq:CameraMode='{mode_str}', EXP:Seq:CameraStatus='{stat_str}'")
         except Exception as e:
-            logger.warning("Could not publish camera status to EPICS: %s", e)
+            self.log(f"Could not publish camera status to EPICS: {e}", "ERROR")
 
     def _setup_epics_listeners(self):
         try:
             import epics
+            # 1. 綁定 Qt Signal 至主線程 Handler
+            self.epics_state_changed.connect(self._handle_epics_auto_sequence)
+            
+            # 2. 訂閱 EPICS PV
             self._epics_state_pv = epics.PV("EXP:Seq:State", callback=self._on_epics_state_change)
-            self.log_daq("Subscribed to EPICS PV: EXP:Seq:State")
+            self.log("Subscribed to EPICS PV: EXP:Seq:State", "INFO")
         except Exception as e:
-            self.log_daq(f"Failed to subscribe to EPICS state PV: {e}")
+            self.log(f"Failed to subscribe to EPICS state PV: {e}", "WARNING")
 
     def _on_epics_state_change(self, pvname=None, value=None, **kwargs):
+        """Executed inside PyEpics C-CA thread -> safely emits Qt Signal to main UI thread."""
         if value is not None:
             state_str = str(value)
-            QTimer.singleShot(0, lambda: self._handle_epics_auto_sequence(state_str))
+            self.epics_state_changed.emit(state_str)  # ✔ 安全觸發跨線程 Signal
 
     def _handle_epics_auto_sequence(self, new_state: str):
         self.pv_state_label.setText(new_state)
 
-        # 1. 即時讀取最新 PV 數據
+        # 1. 即時讀取最新 PV 數據（修正 caget 參數）
         try:
             import epics
-            fn = epics.caget("EXP:Seq:FileName", default="exp_run")
-            sn = epics.caget("EXP:Seq:ShotNumber", default=0)
+            fn_val = epics.caget("EXP:Seq:FileName", as_string=True)
+            sn_val = epics.caget("EXP:Seq:ShotNumber")
+
+            fn = fn_val if fn_val is not None else "exp_run"
+            sn = sn_val if sn_val is not None else 0
+
             self.pv_filename_label.setText(str(fn))
             self.pv_shot_label.setText(str(sn))
-        except Exception:
+        except Exception as e:
             fn, sn = "exp_run", 0
+            self.log(f"Failed reading EPICS PVs: {e}", "WARNING")
 
-        # 防重複執行 (Edge detection)
+        # Edge detection safeguard
         if new_state == self._last_epics_state:
             return
 
-        self.log_daq(f"Sequence State Transition: {self._last_epics_state} -> {new_state}")
+        self.log(f"EPICS State Transition: {self._last_epics_state} -> {new_state}", "INFO")
 
         # 2. 狀態機自動化邏輯
         if new_state == "ARMED":
-            # 進入 ARMED 時，提前喚醒相機 SDK 與預分配 Buffer
             self.controller.set_trigger_mode("EXTERNAL_TTL")
             self.controller.start_capture_all()
-            self.log_daq("⚡ [ARMED] Locked to EXTERNAL_TTL & Started camera SDK capture buffer.")
+            self.log("⚡ [ARMED] Locked to EXTERNAL_TTL & armed camera SDK capture buffer.", "SUCCESS")
 
         elif new_state == "ACQUIRING":
-            # 確保相機在等待 DG645 TTL 脈衝時保持在 capture 狀態
             self.controller.start_capture_all()
-            self.log_daq("⚡ [ACQUIRING] Ready and waiting for DG645 TTL pulse...")
+            self.log("⚡ [ACQUIRING] Camera buffer active, waiting for DG645 TTL trigger pulse...", "INFO")
 
         elif new_state == "SAVING":
-            # 3. 背景自動存檔邏輯
             try:
                 target_dir = self.daq_dir_edit.text().strip()
                 os.makedirs(target_dir, exist_ok=True)
@@ -800,11 +859,11 @@ class SingleGigECameraGUI(QMainWindow):
 
                 if self.latest_frame is not None:
                     tifffile.imwrite(filepath, self.latest_frame)
-                    self.log_daq(f"💾 [SAVING COMPLETE] Successfully saved frame to: {filepath}")
+                    self.log(f"💾 [SAVING AUTO-SAVE] Saved DAQ frame: {filepath}", "SUCCESS")
                 else:
-                    self.log_daq("❌ [SAVING ERROR] No image frame in buffer! Check trigger pulse.")
+                    self.log("❌ [SAVING ERROR] No image frame in buffer to save!", "ERROR")
             except Exception as e:
-                self.log_daq(f"❌ [SAVING ERROR] Failed auto-saving camera image: {e}")
+                self.log(f"❌ [SAVING ERROR] Failed auto-saving camera image: {e}", "ERROR")
 
         self._last_epics_state = new_state
 
