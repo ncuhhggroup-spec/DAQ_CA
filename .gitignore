@@ -4,3 +4,5 @@ Camera/camera_settings.json
 *.json
 Camera/camera_settings.json
 *.pyc
+Oriel_Controller_PID_6Channels_V9_RS232/stage_config.json
+Oriel_Controller_PID_6Channels_V9_RS232/logs/activity_20261002_162038.log
