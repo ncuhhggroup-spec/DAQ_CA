@@ -21,7 +21,7 @@
     "stage_type": "Linear (0.025 µm/cnt)",
     "factor": 0.025,
     "unit": "µm",
-    "step": 10.0
+    "step": 50.0
   },
   {
     "channel": 4,
